@@ -1,0 +1,339 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Security Scanning with Claude Code on AWS - telemetry bucket with its KMS key and access-log bucket, and S3 gateway endpoint (nested in shared.yaml)
+
+Parameters:
+  CreateBucket:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+  RetentionDays:
+    Type: Number
+  AdminPrincipalArnPatterns:
+    Type: CommaDelimitedList
+    Description: IAM principal ARN patterns allowed to read the bucket
+  CreateS3GatewayEndpoint:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+  VpcId:
+    Type: String
+  RouteTableIds:
+    Type: CommaDelimitedList
+  # "Yes" when the kit builds the VPC: the gateway endpoint then serves only boxes and gets a restrictive policy
+  RestrictS3GatewayEndpoint:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "No"
+  ArtifactBucket:
+    Type: String
+    Default: ""
+  ArtifactPrefix:
+    Type: String
+    Default: ""
+  ExistingBucketName:
+    Type: String
+    Default: ""
+
+Conditions:
+  CreateBucket: !Equals [!Ref CreateBucket, "Yes"]
+  # A bucket this stack creates always uses its own KMS key
+  CreateKey: !Equals [!Ref CreateBucket, "Yes"]
+  CreateEndpoint: !Equals [!Ref CreateS3GatewayEndpoint, "Yes"]
+  RestrictBoxWritesToEndpoint: !And [!Condition CreateBucket, !Condition CreateEndpoint]
+  RestrictEndpoint: !And [!Condition CreateEndpoint, !Equals [!Ref RestrictS3GatewayEndpoint, "Yes"]]
+
+Resources:
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: !Ref RouteTableIds
+      # Only the buckets boxes need, so a box can't copy data to other buckets in this Region. A gateway
+      # endpoint in your own VPC serves all its workloads and keeps the default (full access) policy.
+      PolicyDocument: !If
+        - RestrictEndpoint
+        - Version: "2012-10-17"
+          Statement:
+            # Setup scripts and the optional corporate CA certificate
+            - Sid: KitFiles
+              Effect: Allow
+              Principal: "*"
+              Action: s3:GetObject
+              Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactPrefix}*
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+            # Telemetry and session recordings (Session Manager reads the bucket's encryption first)
+            - Sid: TelemetryBucket
+              Effect: Allow
+              Principal: "*"
+              Action:
+                - s3:PutObject
+                - s3:AbortMultipartUpload
+                - s3:GetEncryptionConfiguration
+                - s3:GetBucketLocation
+              Resource:
+                - !Sub
+                  - arn:${AWS::Partition}:s3:::${TelemetryBucket}
+                  - TelemetryBucket: !If [CreateBucket, !Ref Bucket, !Ref ExistingBucketName]
+                - !Sub
+                  - arn:${AWS::Partition}:s3:::${TelemetryBucket}/*
+                  - TelemetryBucket: !If [CreateBucket, !Ref Bucket, !Ref ExistingBucketName]
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+            # AWS-owned buckets: Amazon Linux package repositories (dnf reads them unsigned), and SSM Agent
+            # updates and the SSM documents' modules. Patch Manager's buckets aren't listed (their names
+            # have per-Region suffixes).
+            - Sid: AwsOwnedBuckets
+              Effect: Allow
+              Principal: "*"
+              Action: s3:GetObject
+              Resource:
+                - !Sub arn:${AWS::Partition}:s3:::al2023-repos-${AWS::Region}-de612dc2/*
+                - !Sub arn:${AWS::Partition}:s3:::amazon-ssm-${AWS::Region}/*
+                - !Sub arn:${AWS::Partition}:s3:::aws-ssm-${AWS::Region}/*
+                - !Sub arn:${AWS::Partition}:s3:::${AWS::Region}-birdwatcher-prod/*
+        - !Ref AWS::NoValue
+
+  TelemetryKey:
+    Type: AWS::KMS::Key
+    Condition: CreateKey
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - telemetry, Bedrock invocation logs and session recordings
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Lets IAM policies in this account grant use of the key (box roles: encrypt via S3 only)
+          - Sid: EnableIamPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: BedrockInvocationLogging
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: kms:GenerateDataKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          # Live session recordings in CloudWatch Logs (shared.yaml) are encrypted with this key too
+          - Sid: CloudWatchLogsSessionRecordings
+            Effect: Allow
+            Principal:
+              Service: !Sub logs.${AWS::Region}.${AWS::URLSuffix}
+            Action: [kms:Encrypt*, kms:Decrypt*, kms:ReEncrypt*, kms:GenerateDataKey*, kms:Describe*]
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+  TelemetryKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateKey
+    Properties:
+      AliasName: !Sub alias/claude-scan-telemetry-${AWS::StackName}
+      TargetKeyId: !Ref TelemetryKey
+
+  Bucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    # Turn logging on only once the log bucket accepts deliveries
+    DependsOn: AccessLogsBucketPolicy
+    Properties:
+      # Box roles can write to predictable keys (session-logs/<session-id>); versions keep the original
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt TelemetryKey.Arn
+            BucketKeyEnabled: true
+      # Who read or wrote which object, including admins reading prompts and recordings
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: telemetry-bucket/
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref RetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateBucket
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt Bucket.Arn
+              - !Sub ${Bucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          # Telemetry, prompts and session recordings are readable by admins only
+          - Sid: DenyReadsExceptAdmins
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+            Resource:
+              - !GetAtt Bucket.Arn
+              - !Sub ${Bucket.Arn}/*
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: !Ref AdminPrincipalArnPatterns
+          - Sid: AllowBedrockInvocationLogging
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${Bucket.Arn}/bedrock-logs/*
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:*
+          - !If
+            - RestrictBoxWritesToEndpoint
+            - Sid: DenyBoxWritesOutsideGatewayEndpoint
+              Effect: Deny
+              Principal: "*"
+              Action: s3:PutObject
+              Resource: !Sub ${Bucket.Arn}/*
+              Condition:
+                ArnLike:
+                  aws:PrincipalArn: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/claude-code-box-*
+                StringNotEquals:
+                  aws:SourceVpce: !Ref S3GatewayEndpoint
+            - !Ref AWS::NoValue
+
+  # S3 server access logs for the telemetry bucket. S3 delivers them only to a bucket with SSE-S3 encryption.
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: Target bucket for S3 server access logs; enabling logging here would be recursive
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: Target bucket for S3 server access logs; enabling logging here would be recursive
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_LOGGING_ENABLED
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref RetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateBucket
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt AccessLogsBucket.Arn
+              - !Sub ${AccessLogsBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          # Access logs show who read which telemetry object; admins only, like the telemetry itself
+          - Sid: DenyReadsExceptAdmins
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+            Resource:
+              - !GetAtt AccessLogsBucket.Arn
+              - !Sub ${AccessLogsBucket.Arn}/*
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: !Ref AdminPrincipalArnPatterns
+          # S3 log delivery, from this account's buckets only (the telemetry bucket can't be named here:
+          # it depends on this policy)
+          - Sid: AllowS3ServerAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${AccessLogsBucket.Arn}/telemetry-bucket/*
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+Outputs:
+  BucketName:
+    Value: !If [CreateBucket, !Ref Bucket, "none"]
+  KmsKeyArn:
+    Value: !If [CreateKey, !GetAtt TelemetryKey.Arn, "none"]
+  AccessLogsBucketName:
+    Value: !If [CreateBucket, !Ref AccessLogsBucket, "none"]
+  S3GatewayEndpointId:
+    Value: !If [CreateEndpoint, !Ref S3GatewayEndpoint, "none"]

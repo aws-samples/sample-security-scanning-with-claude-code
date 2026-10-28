@@ -1,0 +1,858 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Security Scanning with Claude Code on AWS - shared account setup (deploy once per account and region). Creates or adopts the
+  network and telemetry bucket, configures Session Manager and Bedrock invocation logging, holds the
+  sign-in and model settings, security group and permissions every box uses, and exports what box stacks import.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Kit location (where you uploaded the claude-scan-kit folder)" }
+        Parameters: [ArtifactBucket, ArtifactPrefix]
+      - Label: { default: "Administrators" }
+        Parameters: [AdminEmail, AdminPrincipalArnPatterns]
+      - Label: { default: "User sign-in (every box)" }
+        Parameters: [AuthMode, SsoStartUrl, SsoRegion, SsoAccountId, SsoRoleName, RequireMfa]
+      - Label: { default: "Claude models (every box)" }
+        Parameters: [ClaudeModel, ExtraModelId, ExtraModelName, ExtraModelCapabilities, ExtraModelContextTokens]
+      - Label: { default: "Network" }
+        Parameters: [CreateNetwork, VpcCidr, ExistingVpcId, ExistingSubnetId, ExistingVpcCidrs, ExistingRouteTableIds, InterfaceEndpoints, ExistingBedrockVpceId, CreateS3GatewayEndpoint, CorporateCaBundleKey]
+      - Label: { default: "Telemetry bucket" }
+        Parameters: [CreateBucket, RetentionDays, ExistingBucketName, ExistingKmsKeyArn]
+      - Label: { default: "Audit and detection" }
+        Parameters: [ConfigureSessionManager, SessionIdleTimeoutMinutes, ConfigureBedrockLogging, LogRetentionDays, ExistingSessionLogGroupName]
+    ParameterLabels:
+      ArtifactBucket: { default: "Kit bucket name" }
+      ArtifactPrefix: { default: "Kit folder prefix" }
+      AdminEmail: { default: "Admin email for alarms" }
+      AdminPrincipalArnPatterns: { default: "Admin role ARN patterns (only these can read telemetry)" }
+      AuthMode: { default: "How users sign in to AWS on their boxes" }
+      SsoStartUrl: { default: "Identity Center start URL" }
+      SsoRegion: { default: "Identity Center region" }
+      SsoAccountId: { default: "Account users sign in to (blank = this account)" }
+      SsoRoleName: { default: "Permission set name" }
+      RequireMfa: { default: "Require MFA on IAM users' Bedrock and box access?" }
+      ClaudeModel: { default: "Default Claude model ID (blank = Claude Code default)" }
+      ExtraModelId: { default: "Extra /model picker model ID (blank = none), e.g. Claude Mythos" }
+      ExtraModelName: { default: "Name shown in the picker" }
+      ExtraModelCapabilities: { default: "Capabilities the extra model supports" }
+      ExtraModelContextTokens: { default: "Extra model's context window in tokens (blank = 200K)" }
+      CreateNetwork: { default: "Create a new VPC?" }
+      VpcCidr: { default: "New VPC CIDR" }
+      ExistingVpcId: { default: "Existing VPC ID" }
+      ExistingSubnetId: { default: "Existing private subnet ID (boxes launch here)" }
+      ExistingVpcCidrs: { default: "Existing VPC CIDR blocks (comma-separated, needed for interface endpoints)" }
+      ExistingRouteTableIds: { default: "Existing private route table IDs (comma-separated)" }
+      InterfaceEndpoints: { default: "Interface VPC endpoints to create (auto, none, or a comma-separated list)" }
+      ExistingBedrockVpceId: { default: "Existing Bedrock runtime VPC endpoint ID (or none)" }
+      CreateS3GatewayEndpoint: { default: "Create an S3 gateway endpoint? (auto = only with a new VPC)" }
+      CorporateCaBundleKey: { default: "Corporate CA bundle in the kit folder, for TLS inspection (or none)" }
+      CreateBucket: { default: "Create a new telemetry bucket?" }
+      RetentionDays: { default: "Days to keep telemetry, Bedrock logs and session recordings" }
+      ExistingBucketName: { default: "Existing bucket name" }
+      ExistingKmsKeyArn: { default: "Existing bucket's KMS key ARN (or none)" }
+      ConfigureSessionManager: { default: "Configure Session Manager (run as 'claude', record sessions)?" }
+      SessionIdleTimeoutMinutes: { default: "Session idle timeout (minutes)" }
+      ConfigureBedrockLogging: { default: "Turn on Bedrock model invocation logging?" }
+      LogRetentionDays: { default: "CloudWatch log retention (days)" }
+      ExistingSessionLogGroupName: { default: "Session recordings log group to keep using (blank = create one)" }
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket in this region that holds the uploaded claude-scan-kit folder
+  ArtifactPrefix:
+    Type: String
+    Default: claude-scan-kit/
+    AllowedPattern: ^.+/$
+    Description: Folder prefix of the kit inside the bucket, ending with /
+  AdminEmail:
+    Type: String
+    AllowedPattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+    Description: Receives telemetry-heartbeat alarms (confirm the subscription email AWS sends)
+  AdminPrincipalArnPatterns:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(|arn:aws[a-z-]*:iam::(\d{12}|\*):role/[^,\s]+(,arn:aws[a-z-]*:iam::(\d{12}|\*):role/[^,\s]+)*)$
+    ConstraintDescription: comma-separated IAM role ARNs or patterns with * wildcards, no spaces
+    Description: >-
+      Required when this stack creates the bucket. The console's account menu shows <role or permission set>/<user>.
+      For a permission set enter arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*AWSReservedSSO_<permission set>_*
+      (for example AWSAdministratorAccess with Control Tower, AdministratorAccess in many other setups); for an IAM
+      role, arn:aws:iam::<account>:role/<name>. Separate several with commas.
+
+  AuthMode:
+    Type: String
+    AllowedValues: [IdentityCenter, IamUser, InstanceRole]
+    Default: IdentityCenter
+    Description: >-
+      IdentityCenter - 'aws sso login' with the ClaudeScanUser permission set and an Owner attribute. IamUser - 'aws login'
+      with the user's console sign-in (no access keys); add users to this stack's IAM group and tag them Owner=<owner>.
+      InstanceRole - each box's own role calls Bedrock (no per-person identity).
+  SsoStartUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(|https://[^\s'"\\]+)$
+  SsoRegion:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(|[a-z]{2}(-[a-z]+)+-\d)$
+  SsoAccountId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(|\d{12})$
+  SsoRoleName:
+    Type: String
+    Default: ClaudeScanUser
+    AllowedPattern: ^[\w+=,.@-]*$
+    Description: The kit's least-privilege permission set (policies/permission-set-claude-scan-user.yaml), not an admin one
+  RequireMfa:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "No"
+    Description: IamUser mode. Turn on only after confirming the users' 'aws login' sessions carry MFA (aws:MultiFactorAuthPresent).
+
+  ClaudeModel:
+    Type: String
+    Default: ""
+    AllowedPattern: ^[A-Za-z0-9.:/_-]*$
+    Description: Bedrock inference profile ID with your region's prefix (us., eu., apac. or global.). Users can still switch with /model.
+  # A model Claude Code doesn't list itself (access is granted per account)
+  ExtraModelId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^[A-Za-z0-9.:/_-]*$
+    Description: >-
+      Bedrock inference profile ID for an extra /model picker row, e.g. us.anthropic.claude-mythos-5-1
+      (global.anthropic.claude-mythos-5-1 outside US regions). Claude models only - other IDs are denied by the kit's policies.
+  ExtraModelName:
+    Type: String
+    Default: ""
+    AllowedPattern: ^[A-Za-z0-9 ._()-]*$
+    Description: e.g. Mythos 5.1 (blank = show the model ID)
+  ExtraModelCapabilities:
+    Type: String
+    Default: effort,xhigh_effort,max_effort,thinking,adaptive_thinking
+    AllowedPattern: ^[a-z_,]*$
+    Description: >-
+      Claude Code can't detect features of a model it doesn't know. Default matches Claude Mythos 5.1
+      (adaptive thinking always on; effort low to max). Values - effort, xhigh_effort, max_effort, thinking,
+      adaptive_thinking, interleaved_thinking.
+  ExtraModelContextTokens:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(|\d{5,7})$
+    Description: e.g. 1000000 for Claude Mythos 5.1. Applies to models Claude Code doesn't recognize.
+
+  CreateNetwork:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+  ExistingVpcId:
+    Type: String
+    Default: ""
+  ExistingSubnetId:
+    Type: String
+    Default: ""
+    Description: Private subnet with outbound internet (NAT) in the existing VPC
+  ExistingRouteTableIds:
+    Type: String
+    Default: ""
+    Description: Needed only to create the S3 gateway endpoint in an existing VPC
+  ExistingVpcCidrs:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(|\d{1,3}(\.\d{1,3}){3}/\d{1,2}(,\d{1,3}(\.\d{1,3}){3}/\d{1,2}){0,3})$
+    ConstraintDescription: up to 4 CIDR blocks, comma-separated, no spaces
+    Description: >-
+      Needed only to create interface endpoints in an existing VPC. List all of the VPC's CIDR blocks (up to 4):
+      the endpoints' private DNS applies to every instance in the VPC, so all of them must be able to reach the endpoints.
+  InterfaceEndpoints:
+    Type: String
+    Default: auto
+    AllowedPattern: ^(auto|none|(ssm|bedrock-runtime|bedrock|logs|cloudformation)(,(ssm|bedrock-runtime|bedrock|logs|cloudformation))*)$
+    ConstraintDescription: auto, none, or a comma-separated list (no spaces) of ssm, bedrock-runtime, bedrock, logs, cloudformation
+    Description: >-
+      auto = all five when this stack creates the VPC, none in an existing VPC. ssm = ssm, ssmmessages and ec2messages
+      (Session Manager); bedrock-runtime = model calls; bedrock = model and inference-profile lookups; logs = CloudWatch
+      Logs (heartbeat, failure reports, session recordings); cloudformation = the box's setup signal. About $7.30 a month
+      each (ssm is three). In an existing VPC, private DNS sends every instance's calls to these services through the new
+      endpoints - list only services the VPC has no endpoint for yet (creating a duplicate fails).
+  ExistingBedrockVpceId:
+    Type: String
+    Default: none
+    Description: >-
+      Only if the VPC already has a bedrock-runtime endpoint (and bedrock-runtime isn't in the list above).
+      The optional agent-perimeter SCP allows model calls only through this endpoint.
+  CreateS3GatewayEndpoint:
+    Type: String
+    AllowedValues: [auto, "Yes", "No"]
+    Default: auto
+    Description: auto = Yes when this stack creates the VPC, No for an existing VPC. Yes with an existing VPC needs its route table IDs.
+
+  CorporateCaBundleKey:
+    Type: String
+    Default: none
+    AllowedPattern: ^(none|scripts/[A-Za-z0-9._/-]+)$
+    ConstraintDescription: none, or a path under scripts/ in the kit folder, e.g. scripts/corporate-ca.pem
+    Description: >-
+      Only if a firewall or proxy inspects TLS. Upload its CA certificate (PEM) with the kit, e.g. as
+      scripts/corporate-ca.pem, and enter that path. Boxes then trust it for package installs, Git, npm, pip,
+      the AWS CLI and Claude Code.
+
+  CreateBucket:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+  RetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+  ExistingBucketName:
+    Type: String
+    Default: ""
+  ExistingKmsKeyArn:
+    Type: String
+    Default: none
+    AllowedPattern: ^(none|arn:aws[a-z-]*:kms:[a-z0-9-]+:\d{12}:key/[A-Za-z0-9-]+)$
+    ConstraintDescription: none, or a KMS key ARN (arn:aws:kms:<region>:<account>:key/<key id>), not an alias
+
+  ConfigureSessionManager:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+    Description: Account-wide - replaces any existing Session Manager preferences in this region
+  SessionIdleTimeoutMinutes:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    MaxValue: 60
+  ConfigureBedrockLogging:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+    Description: Account-wide - replaces any existing Bedrock invocation logging configuration in this region
+  LogRetentionDays:
+    Type: Number
+    Default: 365
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653]
+  ExistingSessionLogGroupName:
+    Type: String
+    Default: ""
+    AllowedPattern: ^[\w./#-]*$
+    Description: >-
+      Deleting this stack keeps its session recordings log group (/claude-scan/<stack name>/sessions). If you create the
+      stack again under the same name, enter that group here to keep using it; creating it again would fail.
+
+Rules:
+  AdminPatternsNeeded:
+    RuleCondition: !Equals [!Ref CreateBucket, "Yes"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AdminPrincipalArnPatterns, ""]]
+        AssertDescription: Enter the admin role ARN patterns - without them nobody could read the new telemetry bucket
+  IdentityCenterNeedsDetails:
+    RuleCondition: !Equals [!Ref AuthMode, IdentityCenter]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref SsoStartUrl, ""]]
+        AssertDescription: Enter the Identity Center start URL
+      - Assert: !Not [!Equals [!Ref SsoRegion, ""]]
+        AssertDescription: Enter the Identity Center region
+      - Assert: !Not [!Equals [!Ref SsoRoleName, ""]]
+        AssertDescription: Enter the permission set name
+  ExistingNetworkNeedsIds:
+    RuleCondition: !Equals [!Ref CreateNetwork, "No"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingVpcId, ""]]
+        AssertDescription: Enter the existing VPC ID (or choose Create a new VPC = Yes)
+      - Assert: !Not [!Equals [!Ref ExistingSubnetId, ""]]
+        AssertDescription: Enter the existing private subnet ID
+  EndpointsInExistingVpcNeedCidrs:
+    RuleCondition: !And
+      - !Equals [!Ref CreateNetwork, "No"]
+      - !Not [!Equals [!Ref InterfaceEndpoints, auto]]
+      - !Not [!Equals [!Ref InterfaceEndpoints, none]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingVpcCidrs, ""]]
+        AssertDescription: Enter the existing VPC's CIDR blocks for its interface endpoints' security group
+  GatewayEndpointNeedsRouteTables:
+    RuleCondition: !And [!Equals [!Ref CreateNetwork, "No"], !Equals [!Ref CreateS3GatewayEndpoint, "Yes"]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingRouteTableIds, ""]]
+        AssertDescription: Enter the private route table IDs, or set Create an S3 gateway endpoint = auto or No
+  ExistingBucketNeedsName:
+    RuleCondition: !Equals [!Ref CreateBucket, "No"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExistingBucketName, ""]]
+        AssertDescription: Enter the existing bucket name (or choose Create a new telemetry bucket = Yes)
+
+Conditions:
+  CreateNetwork: !Equals [!Ref CreateNetwork, "Yes"]
+  AutoEndpoints: !Equals [!Ref InterfaceEndpoints, auto]
+  # The network stack also creates interface endpoints in an existing VPC
+  DeployNetwork: !Or
+    - !Condition CreateNetwork
+    - !Not [!Or [!Condition AutoEndpoints, !Equals [!Ref InterfaceEndpoints, none]]]
+  CreateBucket: !Equals [!Ref CreateBucket, "Yes"]
+  # A bucket this stack creates always uses its own KMS key
+  CreateKey: !Equals [!Ref CreateBucket, "Yes"]
+  CreateS3Gateway: !Or
+    - !Equals [!Ref CreateS3GatewayEndpoint, "Yes"]
+    - !And [!Equals [!Ref CreateS3GatewayEndpoint, auto], !Condition CreateNetwork]
+  DeployStorage: !Or [!Condition CreateBucket, !Condition CreateS3Gateway]
+  CreateSessionLogGroup: !Equals [!Ref ExistingSessionLogGroupName, ""]
+  ExistingKeyGiven: !Not [!Equals [!Ref ExistingKmsKeyArn, none]]
+  IsInstanceRole: !Equals [!Ref AuthMode, InstanceRole]
+  IsIamUser: !Equals [!Ref AuthMode, IamUser]
+  RequireMfa: !And [!Condition IsIamUser, !Equals [!Ref RequireMfa, "Yes"]]
+  SsoAccountIsThisAccount: !Equals [!Ref SsoAccountId, ""]
+  ConfigureSessionManager: !Equals [!Ref ConfigureSessionManager, "Yes"]
+  ConfigureBedrockLogging: !Equals [!Ref ConfigureBedrockLogging, "Yes"]
+
+Resources:
+  Network:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployNetwork
+    Properties:
+      TemplateURL: !Sub https://${ArtifactBucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${ArtifactPrefix}infra/network.yaml
+      Parameters:
+        CreateVpc: !Ref CreateNetwork
+        VpcCidr: !Ref VpcCidr
+        ExistingVpcId: !Ref ExistingVpcId
+        ExistingSubnetId: !Ref ExistingSubnetId
+        ExistingVpcCidrs: !Ref ExistingVpcCidrs
+        Endpoints: !If [AutoEndpoints, "ssm,bedrock-runtime,bedrock,logs,cloudformation", !Ref InterfaceEndpoints]
+        ExistingBedrockVpceId: !Ref ExistingBedrockVpceId
+
+  Storage:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployStorage
+    Properties:
+      TemplateURL: !Sub https://${ArtifactBucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${ArtifactPrefix}infra/storage.yaml
+      Parameters:
+        CreateBucket: !Ref CreateBucket
+        RetentionDays: !Ref RetentionDays
+        AdminPrincipalArnPatterns: !Ref AdminPrincipalArnPatterns
+        CreateS3GatewayEndpoint: !If [CreateS3Gateway, "Yes", "No"]
+        VpcId: !If [CreateNetwork, !GetAtt Network.Outputs.VpcId, !Ref ExistingVpcId]
+        RouteTableIds: !If [CreateNetwork, !GetAtt Network.Outputs.PrivateRouteTableId, !Ref ExistingRouteTableIds]
+        RestrictS3GatewayEndpoint: !Ref CreateNetwork
+        ArtifactBucket: !Ref ArtifactBucket
+        ArtifactPrefix: !Ref ArtifactPrefix
+        ExistingBucketName: !Ref ExistingBucketName
+
+  # Alarm notifications are encrypted with their own key: CloudWatch alarms can't publish to a topic that
+  # uses the AWS managed aws/sns key
+  AlarmTopicKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - alarm notifications (SNS topic)
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Lets IAM policies in this account manage the key
+          - Sid: EnableIamPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: CloudWatchAlarmsPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: [kms:Decrypt, kms:GenerateDataKey*]
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Security Scanning with Claude Code - alarms
+      KmsMasterKeyId: !GetAtt AlarmTopicKey.Arn
+  AlarmEmail:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AdminEmail
+
+  # Each box's collector writes a heartbeat metric here (EMF); silence while running raises an alarm
+  HeartbeatLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: Heartbeat metrics only (CPU load average); encrypted at rest by CloudWatch Logs by default
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: Heartbeat metrics only (CPU load average); encrypted at rest by CloudWatch Logs by default
+    Properties:
+      LogGroupName: !Sub /claude-scan/${AWS::StackName}/heartbeat
+      RetentionInDays: 30
+
+  # Live session recordings; encrypted with the kit's KMS key when this stack creates one
+  SessionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateSessionLogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: Uses the kit's KMS key when this stack creates the bucket; otherwise CloudWatch Logs default encryption
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: Uses the kit's KMS key when this stack creates the bucket; otherwise CloudWatch Logs default encryption
+    Properties:
+      LogGroupName: !Sub /claude-scan/${AWS::StackName}/sessions
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !If [CreateKey, !GetAtt Storage.Outputs.KmsKeyArn, !Ref AWS::NoValue]
+
+  # --- What every box uses: security group, permissions, sign-in and model settings ---
+
+  # One group for all boxes. No inbound rules, so boxes accept no connections, not even from each other
+  # (a shared group only lets members talk if it has a rule naming itself). Customer endpoint security
+  # groups can admit every kit box by this one group.
+  BoxSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030]   # ExistingVpcId is required (Rules) whenever it's used
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: Boxes need outbound internet for Git, package managers and Claude Code updates; egress is reviewed through VPC flow logs
+          - id: W40
+            reason: Boxes need outbound internet for Git, package managers and Claude Code updates; egress is reviewed through VPC flow logs
+    Properties:
+      GroupDescription: Claude scan boxes - no inbound, all outbound
+      VpcId: !If [DeployNetwork, !GetAtt Network.Outputs.VpcId, !Ref ExistingVpcId]
+      SecurityGroupEgress:
+        - Description: Outbound internet (Git, package managers, Claude Code updates) and AWS endpoints
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-boxes
+
+  # Attached to every box role. A box writes telemetry only under its own Owner prefix, taken from its role's
+  # Owner tag (box users can't change role tags).
+  BoxPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1031]   # ExistingBucketName is required (Rules) whenever it's used
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: logs:DescribeLogGroups supports only Resource "*"; the KMS statement names the bucket's key when it's known and is limited by kms:ViaService and the bucket's encryption context
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - box roles (telemetry, session recordings, kit scripts, heartbeat, box settings)
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TelemetryAndSessionRecordings
+            Effect: Allow
+            Action: [s3:PutObject, s3:AbortMultipartUpload]
+            Resource:
+              - !Sub
+                - arn:${AWS::Partition}:s3:::${Bucket}/claude-code/${!aws:PrincipalTag/Owner}/*
+                - Bucket: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+              - !Sub
+                - arn:${AWS::Partition}:s3:::${Bucket}/session-logs/*
+                - Bucket: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+          # Session Manager checks the bucket's encryption before it saves a recording
+          - Sid: BucketEncryptionCheck
+            Effect: Allow
+            Action: s3:GetEncryptionConfiguration
+            Resource: !Sub
+              - arn:${AWS::Partition}:s3:::${Bucket}
+              - Bucket: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+          # Encrypt-only use of the bucket's KMS key, through S3, for this bucket. The key itself when it's
+          # known; any key only for an existing bucket whose key wasn't entered
+          - Sid: BucketKmsThroughS3
+            Effect: Allow
+            Action: [kms:GenerateDataKey, kms:Decrypt]
+            Resource: !If
+              - CreateKey
+              - !GetAtt Storage.Outputs.KmsKeyArn
+              - !If
+                - ExistingKeyGiven
+                - !Ref ExistingKmsKeyArn
+                - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub s3.${AWS::Region}.${AWS::URLSuffix}
+              StringLike:
+                kms:EncryptionContext:aws:s3:arn: !Sub
+                  - arn:${AWS::Partition}:s3:::${Bucket}*
+                  - Bucket: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+          - Sid: KitScripts
+            Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactPrefix}scripts/*
+          # Heartbeat metric (EMF), setup failure reports, live session recordings
+          - Sid: HeartbeatAndSessionLogs
+            Effect: Allow
+            Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${HeartbeatLogGroup}:*
+              - !Sub
+                - arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${Group}:*
+                - Group: !If [CreateSessionLogGroup, !Ref SessionLogGroup, !Ref ExistingSessionLogGroupName]
+          # The SSM agent checks the session log group exists; this action supports only Resource "*"
+          - Sid: SessionLogGroupCheck
+            Effect: Allow
+            Action: logs:DescribeLogGroups
+            Resource: "*"
+          - Sid: BoxSettings
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BoxSettings}
+
+  # Attached to every box role. Bedrock is allowed only when the box itself is the identity (InstanceRole);
+  # in the user modes it's denied, so an expired sign-in fails instead of falling back to the box's role.
+  BoxBedrockPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: bedrock:List*, bedrock:CallWithBearerToken and the Marketplace actions support only Resource "*"; in the user modes the policy only denies
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - box roles' Bedrock access (allowed only with AuthMode = InstanceRole)
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement: !If
+          - IsInstanceRole
+          - - Sid: BedrockClaude
+              Effect: Allow
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, bedrock:CountTokens]
+              Resource:
+                - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-*
+                - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*.anthropic.claude-*
+            - Sid: BedrockProfiles
+              Effect: Allow
+              Action: bedrock:GetInferenceProfile
+              Resource: !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*.anthropic.claude-*
+            # These support only Resource "*"
+            - Sid: BedrockDiscovery
+              Effect: Allow
+              Action: [bedrock:ListInferenceProfiles, bedrock:ListFoundationModels]
+              Resource: "*"
+            - Sid: BedrockShortTermKeys
+              Effect: Allow
+              Action: bedrock:CallWithBearerToken
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  bedrock:bearerTokenType: SHORT_TERM
+            # First use of a Marketplace-listed model (e.g. Claude Mythos) subscribes through Bedrock
+            - Sid: BedrockModelSubscription
+              Effect: Allow
+              Action: [aws-marketplace:Subscribe, aws-marketplace:ViewSubscriptions]
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:CalledViaLast: bedrock.amazonaws.com
+          - - Sid: BoxRoleDoesNotCallBedrock
+              Effect: Deny
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, bedrock:CountTokens]
+              Resource: "*"
+
+  # IamUser mode: add each user to this group and tag the IAM user Owner=<owner>, the Owner of their box.
+  # The same permissions as the ClaudeScanUser permission set, plus 'aws login'.
+  UserGroup:
+    Type: AWS::IAM::Group
+    Condition: IsIamUser
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Admins add users to this group by name
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-users-${AWS::Region}
+  UserGroupPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: IsIamUser
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: bedrock:List*, bedrock:CallWithBearerToken and the EC2/SSM describe actions support only Resource "*"
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - IAM users (aws login, Claude on Bedrock, Session Manager and start/stop for their own box)
+      Groups: [!Ref UserGroup]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AwsLogin
+            Effect: Allow
+            Action: [signin:AuthorizeOAuth2Access, signin:CreateOAuth2Token]
+            Resource: !Sub arn:${AWS::Partition}:signin:*:${AWS::AccountId}:oauth2/public-client/*
+          - Sid: BedrockClaude
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, bedrock:CountTokens]
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-*
+              - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*.anthropic.claude-*
+            Condition: !If [RequireMfa, { Bool: { aws:MultiFactorAuthPresent: "true" } }, !Ref AWS::NoValue]
+          - Sid: BedrockProfiles
+            Effect: Allow
+            Action: bedrock:GetInferenceProfile
+            Resource: !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*.anthropic.claude-*
+          # These support only Resource "*"
+          - Sid: BedrockDiscovery
+            Effect: Allow
+            Action: [bedrock:ListInferenceProfiles, bedrock:ListFoundationModels]
+            Resource: "*"
+          - Sid: BedrockShortTermKeys
+            Effect: Allow
+            Action: bedrock:CallWithBearerToken
+            Resource: "*"
+            Condition:
+              StringEquals:
+                bedrock:bearerTokenType: SHORT_TERM
+          - Sid: BedrockModelSubscription
+            Effect: Allow
+            Action: [aws-marketplace:Subscribe, aws-marketplace:ViewSubscriptions]
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:CalledViaLast: bedrock.amazonaws.com
+          # Own box only: the user's Owner tag must equal the box's Owner tag
+          - Sid: SessionToOwnBox
+            Effect: Allow
+            Action: ssm:StartSession
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ssm:resourceTag/Owner: ${aws:PrincipalTag/Owner}
+              Bool: !If [RequireMfa, { aws:MultiFactorAuthPresent: "true" }, !Ref AWS::NoValue]
+          - Sid: SessionDocuments
+            Effect: Allow
+            Action: ssm:StartSession
+            Resource:
+              - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/SSM-SessionManagerRunShell
+              - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-StartInteractiveCommand
+          - Sid: OwnSessions
+            Effect: Allow
+            Action: [ssm:TerminateSession, ssm:ResumeSession]
+            Resource: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:session/${!aws:username}-*
+          # Start the box again after the idle stop (or stop it when done)
+          - Sid: StartStopOwnBox
+            Effect: Allow
+            Action: [ec2:StartInstances, ec2:StopInstances]
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Owner: ${aws:PrincipalTag/Owner}
+          - Sid: ConsoleConnect
+            Effect: Allow
+            Action: [ec2:DescribeInstances, ec2:DescribeInstanceStatus, ssm:DescribeInstanceInformation, ssm:DescribeInstanceProperties, ssm:DescribeSessions, ssm:GetConnectionStatus]
+            Resource: "*"
+
+  # Sign-in and model settings every box reads at setup, and again when its setup modules are rerun.
+  # A parameter rather than exports: an exported value can't change while box stacks import it.
+  BoxSettings:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /claude-scan/${AWS::StackName}/box-settings
+      Type: String
+      Description: Security Scanning with Claude Code on AWS - sign-in and model settings for every box (managed by the shared stack)
+      Value: !Sub
+        - >-
+          {"AUTH_MODE": "${AuthMode}", "SSO_START_URL": "${SsoStartUrl}", "SSO_REGION": "${SsoRegion}",
+          "SSO_ACCOUNT_ID": "${SsoAccount}", "SSO_ROLE_NAME": "${SsoRoleName}", "CLAUDE_MODEL": "${ClaudeModel}",
+          "EXTRA_MODEL_ID": "${ExtraModelId}", "EXTRA_MODEL_NAME": "${ExtraModelName}",
+          "EXTRA_MODEL_CAPABILITIES": "${ExtraModelCapabilities}", "EXTRA_MODEL_CONTEXT_TOKENS": "${ExtraModelContextTokens}",
+          "CORPORATE_CA_KEY": "${CorporateCaBundleKey}"}
+        - SsoAccount: !If [SsoAccountIsThisAccount, !Ref AWS::AccountId, !Ref SsoAccountId]
+
+  # Account-wide Session Manager preferences: land as the 'claude' user, record every session
+  SessionManagerPreferences:
+    Type: AWS::SSM::Document
+    Condition: ConfigureSessionManager
+    Properties:
+      Name: SSM-SessionManagerRunShell
+      DocumentType: Session
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: "1.0"
+        description: Security Scanning with Claude Code on AWS - Session Manager preferences
+        sessionType: Standard_Stream
+        inputs:
+          s3BucketName: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+          s3KeyPrefix: session-logs
+          s3EncryptionEnabled: true
+          cloudWatchLogGroupName: !If [CreateSessionLogGroup, !Ref SessionLogGroup, !Ref ExistingSessionLogGroupName]
+          cloudWatchEncryptionEnabled: !If [CreateKey, true, false]
+          cloudWatchStreamingEnabled: true
+          kmsKeyId: ""
+          runAsEnabled: true
+          runAsDefaultUser: claude
+          idleSessionTimeout: !Ref SessionIdleTimeoutMinutes
+          maxSessionDuration: ""
+          shellProfile:
+            linux: ""
+            windows: ""
+
+  # No CloudFormation resource exists for Bedrock invocation logging, so a small custom resource sets it.
+  # The role name matches the 'claude-scan-platform-*' exemption in the optional SCPs.
+  BedrockLoggingRole:
+    Type: AWS::IAM::Role
+    Condition: ConfigureBedrockLogging
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: The Bedrock invocation-logging configuration actions support only Resource "*"
+          - id: W28
+            reason: Fixed name matches the claude-scan-platform-* exemption in the optional SCPs
+    Properties:
+      RoleName: !Sub claude-scan-platform-bedrock-logging-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: bedrock-logging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:PutModelInvocationLoggingConfiguration
+                  - bedrock:GetModelInvocationLoggingConfiguration
+                  - bedrock:DeleteModelInvocationLoggingConfiguration
+                Resource: "*"
+  BedrockLoggingFunction:
+    Type: AWS::Lambda::Function
+    Condition: ConfigureBedrockLogging
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: The role has AWSLambdaBasicExecutionRole, which grants CloudWatch Logs access
+          - id: W89
+            reason: Custom resource that only calls the Bedrock control plane during stack operations; no VPC access needed
+          - id: W92
+            reason: Runs only during stack operations; reserving concurrency fails in new accounts whose limit is still 10
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: Runs only during stack operations; reserving concurrency fails in new accounts whose limit is still 10
+          - id: CKV_AWS_116
+            comment: Invoked synchronously by CloudFormation as a custom resource; a dead-letter queue doesn't apply
+          - id: CKV_AWS_117
+            comment: Custom resource that only calls the Bedrock control plane during stack operations; no VPC access needed
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - sets Bedrock model invocation logging to the telemetry bucket
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 60
+      Role: !GetAtt BedrockLoggingRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              props = event["ResourceProperties"]
+              bedrock = boto3.client("bedrock")
+              try:
+                  if event["RequestType"] in ("Create", "Update"):
+                      bedrock.put_model_invocation_logging_configuration(loggingConfig={
+                          "s3Config": {"bucketName": props["BucketName"], "keyPrefix": "bedrock-logs"},
+                          "textDataDeliveryEnabled": True,
+                          "imageDataDeliveryEnabled": False,
+                          "embeddingDataDeliveryEnabled": False,
+                      })
+                  else:
+                      bedrock.delete_model_invocation_logging_configuration()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "bedrock-invocation-logging")
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, "bedrock-invocation-logging",
+                                   reason=str(e)[:500])
+  BedrockInvocationLogging:
+    Type: Custom::BedrockInvocationLogging
+    Condition: ConfigureBedrockLogging
+    Properties:
+      ServiceToken: !GetAtt BedrockLoggingFunction.Arn
+      ServiceTimeout: 300
+      BucketName: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+
+Outputs:
+  VpcId:
+    Value: !If [CreateNetwork, !GetAtt Network.Outputs.VpcId, !Ref ExistingVpcId]
+    Export: { Name: !Sub "${AWS::StackName}-VpcId" }
+  SubnetId:
+    Value: !If [CreateNetwork, !GetAtt Network.Outputs.PrivateSubnetId, !Ref ExistingSubnetId]
+    Export: { Name: !Sub "${AWS::StackName}-SubnetId" }
+  BedrockVpceId:
+    Value: !If [DeployNetwork, !GetAtt Network.Outputs.BedrockRuntimeVpceId, !Ref ExistingBedrockVpceId]
+    Export: { Name: !Sub "${AWS::StackName}-BedrockVpceId" }
+  S3GatewayEndpointId:
+    Value: !If [DeployStorage, !GetAtt Storage.Outputs.S3GatewayEndpointId, "none"]
+    Export: { Name: !Sub "${AWS::StackName}-S3GatewayEndpointId" }
+  TelemetryBucket:
+    Value: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+    Export: { Name: !Sub "${AWS::StackName}-TelemetryBucket" }
+  TelemetryKmsKeyArn:
+    Value: !If [CreateBucket, !GetAtt Storage.Outputs.KmsKeyArn, !Ref ExistingKmsKeyArn]
+    Export: { Name: !Sub "${AWS::StackName}-TelemetryKmsKeyArn" }
+  AccessLogsBucket:
+    Description: S3 access logs for the telemetry bucket (who read or wrote which object), when this stack creates the bucket
+    Value: !If [CreateBucket, !GetAtt Storage.Outputs.AccessLogsBucketName, "none"]
+  ArtifactBucket:
+    Value: !Ref ArtifactBucket
+    Export: { Name: !Sub "${AWS::StackName}-ArtifactBucket" }
+  ArtifactPrefix:
+    Value: !Ref ArtifactPrefix
+    Export: { Name: !Sub "${AWS::StackName}-ArtifactPrefix" }
+  AlarmTopicArn:
+    Value: !Ref AlarmTopic
+    Export: { Name: !Sub "${AWS::StackName}-AlarmTopicArn" }
+  HeartbeatLogGroup:
+    Value: !Ref HeartbeatLogGroup
+    Export: { Name: !Sub "${AWS::StackName}-HeartbeatLogGroup" }
+  SessionLogGroup:
+    Value: !If [CreateSessionLogGroup, !Ref SessionLogGroup, !Ref ExistingSessionLogGroupName]
+    Export: { Name: !Sub "${AWS::StackName}-SessionLogGroup" }
+  SessionManagerConfigured:
+    Value: !Ref ConfigureSessionManager
+    Export: { Name: !Sub "${AWS::StackName}-SessionManagerConfigured" }
+  BoxSecurityGroupId:
+    Value: !Ref BoxSecurityGroup
+    Export: { Name: !Sub "${AWS::StackName}-BoxSecurityGroupId" }
+  BoxPolicyArn:
+    Value: !Ref BoxPolicy
+    Export: { Name: !Sub "${AWS::StackName}-BoxPolicyArn" }
+  BoxBedrockPolicyArn:
+    Value: !Ref BoxBedrockPolicy
+    Export: { Name: !Sub "${AWS::StackName}-BoxBedrockPolicyArn" }
+  BoxSettingsParameter:
+    Value: !Ref BoxSettings
+    Export: { Name: !Sub "${AWS::StackName}-BoxSettingsParameter" }
+  UserGroup:
+    Condition: IsIamUser
+    Description: IamUser mode - add each user to this group and tag the IAM user Owner=<the Owner of their box>
+    Value: !Ref UserGroup

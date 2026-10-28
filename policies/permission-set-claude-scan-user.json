@@ -1,0 +1,80 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockClaude",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:CountTokens"],
+      "Resource": [
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
+        "arn:aws:bedrock:*:*:inference-profile/*.anthropic.claude-*"
+      ]
+    },
+    {
+      "Sid": "BedrockProfiles",
+      "Effect": "Allow",
+      "Action": "bedrock:GetInferenceProfile",
+      "Resource": "arn:aws:bedrock:*:*:inference-profile/*.anthropic.claude-*"
+    },
+    {
+      "Sid": "BedrockDiscovery",
+      "Effect": "Allow",
+      "Action": ["bedrock:ListInferenceProfiles", "bedrock:ListFoundationModels"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BedrockShortTermKeys",
+      "Effect": "Allow",
+      "Action": "bedrock:CallWithBearerToken",
+      "Resource": "*",
+      "Condition": { "StringEquals": { "bedrock:bearerTokenType": "SHORT_TERM" } }
+    },
+    {
+      "Sid": "BedrockModelSubscription",
+      "Effect": "Allow",
+      "Action": ["aws-marketplace:Subscribe", "aws-marketplace:ViewSubscriptions"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:CalledViaLast": "bedrock.amazonaws.com" } }
+    },
+    {
+      "Sid": "SessionToOwnBox",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": { "StringEquals": { "ssm:resourceTag/Owner": "${aws:PrincipalTag/Owner}" } }
+    },
+    {
+      "Sid": "SessionDocuments",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": [
+        "arn:aws:ssm:*:*:document/SSM-SessionManagerRunShell",
+        "arn:aws:ssm:*::document/AWS-StartInteractiveCommand"
+      ]
+    },
+    {
+      "Sid": "OwnSessions",
+      "Effect": "Allow",
+      "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
+      "Resource": "arn:aws:ssm:*:*:session/*",
+      "Condition": { "StringLike": { "ssm:resourceTag/aws:ssmmessages:session-id": ["${aws:userid}"] } }
+    },
+    {
+      "Sid": "StartStopOwnBox",
+      "Effect": "Allow",
+      "Action": ["ec2:StartInstances", "ec2:StopInstances"],
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": { "StringEquals": { "aws:ResourceTag/Owner": "${aws:PrincipalTag/Owner}" } }
+    },
+    {
+      "Sid": "ConsoleConnect",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances", "ec2:DescribeInstanceStatus",
+        "ssm:DescribeInstanceInformation", "ssm:DescribeInstanceProperties",
+        "ssm:DescribeSessions", "ssm:GetConnectionStatus"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
