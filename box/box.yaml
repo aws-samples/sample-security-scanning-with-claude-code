@@ -1,0 +1,377 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Security Scanning with Claude Code on AWS - one sandboxed Claude Code box for one user (deploy once per user, after shared.yaml).
+  Amazon Linux 2023, SSM access only, Claude Code on Bedrock, the defending-code harness, mandatory telemetry.
+  Sign-in, models, permissions and the security group come from the shared stack.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Shared setup" }
+        Parameters: [SharedStackName]
+      - Label: { default: "User" }
+        Parameters: [Owner]
+      - Label: { default: "Box" }
+        Parameters: [InstanceType, VolumeSize, Toolchains, ExtraPackages, EnableSandbox, InstallHarness, AutoStopIdleHours, LatestAmiId]
+    ParameterLabels:
+      SharedStackName: { default: "Name of the shared.yaml stack" }
+      Owner: { default: "Owner (short name, e.g. jdoe)" }
+      InstanceType: { default: "Instance type (x86_64)" }
+      VolumeSize: { default: "Disk size (GiB)" }
+      Toolchains: { default: "Toolchains to install (comma-separated, or none)" }
+      ExtraPackages: { default: "Extra dnf packages (space-separated)" }
+      EnableSandbox: { default: "Install Docker for the harness sandbox?" }
+      InstallHarness: { default: "Install the defending-code harness (scan-harness.sh)?" }
+      AutoStopIdleHours: { default: "Stop after this many idle hours (0 = never)" }
+
+Parameters:
+  SharedStackName:
+    Type: String
+    Default: claude-scan-shared
+  Owner:
+    Type: String
+    AllowedPattern: ^[a-z0-9][a-z0-9-]{1,29}$
+    Description: >-
+      Lowercase letters, digits and hyphens. Used in names, tags and telemetry. Must equal the user's Owner value:
+      the Identity Center Owner attribute, or the IAM user's Owner tag (see the shared stack's sign-in mode).
+  InstanceType:
+    Type: String
+    Default: t3.xlarge
+  VolumeSize:
+    Type: Number
+    Default: 100
+    MinValue: 30
+  Toolchains:
+    Type: String
+    Default: java,node,python,go,rust,cpp,dotnet
+    AllowedPattern: ^(none|(java|node|python|go|rust|cpp|dotnet)(,(java|node|python|go|rust|cpp|dotnet))*)$
+    ConstraintDescription: none, or a comma-separated list (no spaces) of java, node, python, go, rust, cpp, dotnet
+    Description: >-
+      java (Corretto 21, Maven), node (Node.js 22, TypeScript, tsx, pnpm, yarn), python (3.12, pip, uv), go,
+      rust (with Cargo), cpp (GCC, Clang, Make, CMake, GDB), dotnet (.NET 8 SDK). Add one later on the box with
+      'sudo claude-scan-bootstrap --only toolchain-<name>'.
+  ExtraPackages:
+    Type: String
+    Default: ""
+    AllowedPattern: ^[A-Za-z0-9._+ -]*$
+  EnableSandbox:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  InstallHarness:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Clones the defending-code harness and installs scan-harness.sh. Claude Code is always installed.
+  AutoStopIdleHours:
+    Type: Number
+    Default: 4
+    MinValue: 0
+    MaxValue: 24
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  AutoStop: !Not [!Equals [!Ref AutoStopIdleHours, 0]]
+
+Resources:
+  # Permissions come from the shared stack's managed policies. The Owner tag scopes them to this box's own
+  # telemetry prefix (box users can't change role tags).
+  BoxRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Fixed name matches the claude-code-box-* pattern used by the bucket policy and the optional SCPs
+    Properties:
+      # Matches the 'claude-code-box-*' pattern in the optional SCPs and the bucket policy
+      RoleName: !Sub claude-code-box-${Owner}-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - { "Fn::ImportValue": !Sub "${SharedStackName}-BoxPolicyArn" }
+        - { "Fn::ImportValue": !Sub "${SharedStackName}-BoxBedrockPolicyArn" }
+      Tags:
+        - Key: Owner
+          Value: !Ref Owner
+
+  # cfn-signal signs the setup signal with the box role (--role): a kit-built VPC's CloudFormation endpoint
+  # takes only this account's principals, not cfn-signal's default instance-identity signature
+  SetupSignalPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: !Sub Security Scanning with Claude Code on AWS - setup signal for box stack ${AWS::StackName}
+      Roles: [!Ref BoxRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:SignalResource
+            Resource: !Ref AWS::StackId
+
+  BoxInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub claude-code-box-${Owner}-${AWS::Region}
+      Roles: [!Ref BoxRole]
+
+  # UserData lives here so any change creates a new template version, which replaces the instance
+  BoxLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref VolumeSize
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              LOG=/var/log/claude-scan-bootstrap.log
+              exec > >(tee -a $LOG) 2>&1
+              # Usually preinstalled on the AMI. Skipping dnf then lets a blocked package repository reach the
+              # bootstrap's preflight check, which says what to fix.
+              rpm -q aws-cfn-bootstrap > /dev/null 2>&1 || dnf install -y aws-cfn-bootstrap
+
+              # On failure, say why on the instance console and in CloudWatch Logs - both outlive a rolled-back
+              # instance, while the CloudFormation error can only show the instance ID - then signal failure
+              report_failure() {
+                trap - ERR
+                set +e
+                step=$(cat /var/log/claude-scan-bootstrap.failure 2>/dev/null || echo "exit $1 in user data: $2")
+                summary="Claude scan box bootstrap FAILED: $step"
+                echo "$summary" | tee /dev/console
+                stream=bootstrap-failure-$(date -u +%Y%m%dT%H%M%SZ)-$(cat /var/lib/cloud/data/instance-id 2>/dev/null)
+                { echo "$summary"; grep -v -e '^+' -e '^[[:space:]]*$' $LOG | tail -n 200; } | python3 -c '
+              import json, sys, time
+              t = int(time.time() * 1000)
+              print(json.dumps([{"timestamp": t + i, "message": l.rstrip()[:4000] or "-"} for i, l in enumerate(sys.stdin)]))' > /tmp/bootstrap-failure.json
+                aws logs create-log-stream --region ${AWS::Region} --log-group-name "${HeartbeatLogGroup}" --log-stream-name "$stream" &&
+                  aws logs put-log-events --region ${AWS::Region} --log-group-name "${HeartbeatLogGroup}" --log-stream-name "$stream" \
+                    --log-events file:///tmp/bootstrap-failure.json > /dev/null &&
+                  echo "Details: CloudWatch Logs group ${HeartbeatLogGroup}, stream $stream" | tee /dev/console
+                /opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource Instance --region ${AWS::Region} --role ${BoxRole}
+              }
+              trap 'report_failure $? "$BASH_COMMAND"' ERR
+
+              install -d -m 755 /etc/claude-scan
+              cat > /etc/claude-scan/box.env <<'EOF'
+              OWNER='${Owner}'
+              TOOLCHAINS='${Toolchains}'
+              EXTRA_PACKAGES='${ExtraPackages}'
+              ENABLE_SANDBOX='${EnableSandbox}'
+              INSTALL_HARNESS='${InstallHarness}'
+              REGION='${AWS::Region}'
+              TELEMETRY_BUCKET='${TelemetryBucket}'
+              ARTIFACT_BUCKET='${ArtifactBucket}'
+              ARTIFACT_PREFIX='${ArtifactPrefix}'
+              HEARTBEAT_LOG_GROUP='${HeartbeatLogGroup}'
+              SESSION_MANAGER_CONFIGURED='${SessionManagerConfigured}'
+              BOX_SETTINGS_PARAMETER='${BoxSettingsParameter}'
+              KIT_TEMPLATE_VERSION='$Format:%cs.%h$'
+              EOF
+
+              aws s3 cp --region ${AWS::Region} "s3://${ArtifactBucket}/${ArtifactPrefix}scripts/box-bootstrap.sh" /usr/local/sbin/claude-scan-bootstrap
+              chmod 700 /usr/local/sbin/claude-scan-bootstrap
+              /usr/local/sbin/claude-scan-bootstrap
+
+              /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource Instance --region ${AWS::Region} --role ${BoxRole}
+            - TelemetryBucket: { "Fn::ImportValue": !Sub "${SharedStackName}-TelemetryBucket" }
+              ArtifactBucket: { "Fn::ImportValue": !Sub "${SharedStackName}-ArtifactBucket" }
+              ArtifactPrefix: { "Fn::ImportValue": !Sub "${SharedStackName}-ArtifactPrefix" }
+              HeartbeatLogGroup: { "Fn::ImportValue": !Sub "${SharedStackName}-HeartbeatLogGroup" }
+              SessionManagerConfigured: { "Fn::ImportValue": !Sub "${SharedStackName}-SessionManagerConfigured" }
+              BoxSettingsParameter: { "Fn::ImportValue": !Sub "${SharedStackName}-BoxSettingsParameter" }
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: SetupSignalPolicy   # the role can signal before setup ends
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT45M
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref BoxInstanceProfile
+      SubnetId: { "Fn::ImportValue": !Sub "${SharedStackName}-SubnetId" }
+      # Shared by all boxes: no inbound rules, so boxes accept no connections, including from each other
+      SecurityGroupIds: [{ "Fn::ImportValue": !Sub "${SharedStackName}-BoxSecurityGroupId" }]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BoxLaunchTemplate
+        Version: !GetAtt BoxLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub claude-scan-${Owner}
+        - Key: Owner
+          Value: !Ref Owner
+
+  # Fires when the box is running (EC2 reports CPU) but its collector has gone silent
+  TelemetryHeartbeatAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: The owner's name in the alarm name is what tells the admin which box went silent
+    Properties:
+      AlarmName: !Sub claude-scan-${Owner}-telemetry-silent
+      AlarmDescription: !Sub >-
+        Box ${Owner} is running but its telemetry collector stopped sending heartbeats.
+        Check the box; telemetry may have been disabled.
+      ComparisonOperator: LessThanThreshold
+      Threshold: 0
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      TreatMissingData: notBreaching
+      AlarmActions: [{ "Fn::ImportValue": !Sub "${SharedStackName}-AlarmTopicArn" }]
+      OKActions: [{ "Fn::ImportValue": !Sub "${SharedStackName}-AlarmTopicArn" }]
+      Metrics:
+        - Id: cpu
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/EC2
+              MetricName: CPUUtilization
+              Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+            Period: 300
+            Stat: Average
+        - Id: heartbeat
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ClaudeScan
+              MetricName: system.cpu.load_average.1m
+              Dimensions:
+                - { Name: InstanceId, Value: !Ref Instance }
+                - { Name: Owner, Value: !Ref Owner }
+            Period: 300
+            Stat: SampleCount
+        - Id: silent
+          Label: heartbeat while running (-1 = missing)
+          ReturnData: true
+          Expression: IF(cpu >= 0, FILL(heartbeat, -1), 0)
+
+  # Fires when telemetry stops leaving the box, for example after a bucket, KMS key or S3 endpoint policy
+  # change that blocks the box's writes; the box keeps it queued until writes work again. A healthy queue
+  # holds about a minute of requests (it's flushed once a minute) and stays level, so the alarm looks for a
+  # signal's queue growing by more than 10 in each of three 5-minute periods, or staying above 200.
+  TelemetryDeliveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: The owner's name in the alarm name is what tells the admin which box is affected
+    Properties:
+      AlarmName: !Sub claude-scan-${Owner}-telemetry-undelivered
+      AlarmDescription: !Sub >-
+        Box ${Owner}'s telemetry isn't reaching the S3 bucket and is queueing on the box (up to about half a day,
+        delivered once writes work again). Check the bucket policy, its KMS key policy and the S3 endpoint policy.
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      TreatMissingData: notBreaching
+      AlarmActions: [{ "Fn::ImportValue": !Sub "${SharedStackName}-AlarmTopicArn" }]
+      OKActions: [{ "Fn::ImportValue": !Sub "${SharedStackName}-AlarmTopicArn" }]
+      Metrics:
+        - Id: logs
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ClaudeScan
+              MetricName: otelcol_exporter_queue_size
+              Dimensions:
+                - { Name: InstanceId, Value: !Ref Instance }
+                - { Name: Owner, Value: !Ref Owner }
+                - { Name: exporter, Value: awss3/logs }
+            Period: 300
+            Stat: Maximum
+        - Id: logsstuck
+          ReturnData: false
+          Expression: IF(DIFF(logs) > 10 || logs > 200, 1, 0)
+        - Id: metrics
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ClaudeScan
+              MetricName: otelcol_exporter_queue_size
+              Dimensions:
+                - { Name: InstanceId, Value: !Ref Instance }
+                - { Name: Owner, Value: !Ref Owner }
+                - { Name: exporter, Value: awss3/metrics }
+            Period: 300
+            Stat: Maximum
+        - Id: metricsstuck
+          ReturnData: false
+          Expression: IF(DIFF(metrics) > 10 || metrics > 200, 1, 0)
+        - Id: traces
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ClaudeScan
+              MetricName: otelcol_exporter_queue_size
+              Dimensions:
+                - { Name: InstanceId, Value: !Ref Instance }
+                - { Name: Owner, Value: !Ref Owner }
+                - { Name: exporter, Value: awss3/traces }
+            Period: 300
+            Stat: Maximum
+        - Id: tracesstuck
+          ReturnData: false
+          Expression: IF(DIFF(traces) > 10 || traces > 200, 1, 0)
+        - Id: stuck
+          Label: a signal's queue is growing or above 200 (1 = yes)
+          ReturnData: true
+          Expression: MAX([logsstuck, metricsstuck, tracesstuck])
+
+  IdleStopAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AutoStop
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: The owner's name in the alarm name identifies whose box it stops
+    Properties:
+      AlarmName: !Sub claude-scan-${Owner}-idle-stop
+      AlarmDescription: !Sub Stops box ${Owner} after ${AutoStopIdleHours} hours below 2% CPU
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions: [{ Name: InstanceId, Value: !Ref Instance }]
+      Statistic: Average
+      Period: 3600
+      EvaluationPeriods: !Ref AutoStopIdleHours
+      Threshold: 2
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Sub "arn:${AWS::Partition}:automate:${AWS::Region}:ec2:stop"]
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  ConnectCommand:
+    Description: Run from a terminal with AWS CLI v2 and the Session Manager plugin (or use EC2 console > Connect > Session Manager). The login banner shows how to sign in.
+    Value: !Sub aws ssm start-session --region ${AWS::Region} --target ${Instance}
+  ConnectCommandWithoutSessionPreferences:
+    Description: Use this instead if shared.yaml did not configure Session Manager (sessions would otherwise land as ssm-user)
+    Value: !Sub >-
+      aws ssm start-session --region ${AWS::Region} --target ${Instance}
+      --document-name AWS-StartInteractiveCommand --parameters command="sudo -iu claude"

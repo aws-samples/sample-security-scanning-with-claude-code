@@ -1,0 +1,63 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyLeaveOrganization",
+      "Effect": "Deny",
+      "Action": "organizations:LeaveOrganization",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyIamChanges",
+      "Effect": "Deny",
+      "Action": [
+        "iam:Add*", "iam:Attach*", "iam:ChangePassword", "iam:Create*", "iam:Deactivate*", "iam:Delete*",
+        "iam:Detach*", "iam:Enable*", "iam:PassRole", "iam:Put*", "iam:Remove*", "iam:Reset*", "iam:Set*",
+        "iam:Tag*", "iam:Untag*", "iam:Update*", "iam:Upload*"
+      ],
+      "Resource": "*",
+      "Condition": { "ArnNotLike": { "aws:PrincipalArn": "__PLATFORM_PRINCIPALS__" } }
+    },
+    {
+      "Sid": "DenyProvisioningAndEgressPaths",
+      "Effect": "Deny",
+      "Action": [
+        "bedrock:Create*", "bedrock:Delete*", "bedrock:Put*", "bedrock:Update*",
+        "cloudformation:Create*", "cloudformation:Execute*", "cloudformation:Update*",
+        "directconnect:*", "globalaccelerator:*", "lightsail:*", "ram:*", "savingsplans:*",
+        "ec2:Accept*", "ec2:Allocate*", "ec2:Associate*", "ec2:Attach*", "ec2:Authorize*", "ec2:Copy*",
+        "ec2:Create*", "ec2:Import*", "ec2:Modify*", "ec2:Purchase*", "ec2:Replace*", "ec2:Request*", "ec2:Run*",
+        "s3:CreateBucket", "s3:PutAccountPublicAccessBlock", "s3:PutBucketAcl", "s3:PutBucketPolicy",
+        "s3:PutBucketPublicAccessBlock", "s3:PutObjectAcl", "s3:PutReplicationConfiguration",
+        "kms:Create*", "kms:DisableKey", "kms:PutKeyPolicy", "kms:ScheduleKeyDeletion",
+        "lambda:AddPermission", "lambda:Create*", "lambda:Publish*", "lambda:UpdateFunction*",
+        "secretsmanager:Create*", "secretsmanager:PutResourcePolicy", "secretsmanager:PutSecretValue",
+        "sns:Create*", "sns:SetTopicAttributes", "sns:Subscribe", "sqs:CreateQueue", "sqs:SetQueueAttributes",
+        "aoss:Create*", "apigateway:POST", "apigateway:PUT", "cloudfront:Create*", "codebuild:Create*",
+        "codecommit:Create*", "dynamodb:Create*", "ecr:Create*", "ecr:SetRepositoryPolicy", "ecs:Create*",
+        "ecs:Register*", "ecs:RunTask", "ecs:StartTask", "eks:Create*", "elasticache:Create*",
+        "elasticloadbalancing:Create*", "es:Create*", "firehose:Create*", "kinesis:CreateStream",
+        "rds:Create*", "rds:Restore*", "redshift:Create*", "route53:ChangeResourceRecordSets",
+        "route53:Create*", "sagemaker:Create*", "states:Create*"
+      ],
+      "Resource": "*",
+      "Condition": { "ArnNotLike": { "aws:PrincipalArn": "__PLATFORM_PRINCIPALS__" } }
+    },
+    {
+      "Sid": "DenyLogSecurityAndDataTampering",
+      "Effect": "Deny",
+      "Action": [
+        "logs:CreateExportTask", "logs:Delete*", "logs:DisassociateKmsKey", "logs:PutDestination",
+        "logs:PutDestinationPolicy", "logs:PutRetentionPolicy", "logs:PutSubscriptionFilter",
+        "cloudtrail:Delete*", "cloudtrail:Put*", "cloudtrail:Stop*", "cloudtrail:Update*",
+        "config:Delete*", "config:Put*", "config:Stop*",
+        "guardduty:Delete*", "guardduty:Disassociate*", "guardduty:Stop*", "guardduty:Update*",
+        "securityhub:Delete*", "securityhub:Disable*", "securityhub:Disassociate*",
+        "access-analyzer:Delete*",
+        "s3:DeleteBucket*", "s3:DeleteObject*", "s3:PutBucketVersioning", "s3:PutLifecycleConfiguration"
+      ],
+      "Resource": "*",
+      "Condition": { "ArnNotLike": { "aws:PrincipalArn": "__PLATFORM_PRINCIPALS__" } }
+    }
+  ]
+}

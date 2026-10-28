@@ -1,0 +1,60 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyBoxOutsideAllowlist",
+      "Effect": "Deny",
+      "NotAction": [
+        "bedrock:CallWithBearerToken", "bedrock:CountTokens", "bedrock:Get*", "bedrock:Invoke*", "bedrock:List*",
+        "aws-marketplace:Subscribe", "aws-marketplace:ViewSubscriptions",
+        "s3:AbortMultipartUpload", "s3:GetEncryptionConfiguration", "s3:GetObject", "s3:PutObject",
+        "kms:Decrypt", "kms:GenerateDataKey",
+        "logs:CreateLogStream", "logs:DescribeLogGroups", "logs:DescribeLogStreams", "logs:PutLogEvents",
+        "cloudformation:SignalResource", "sts:GetCallerIdentity",
+        "ssm:DescribeAssociation", "ssm:DescribeDocument", "ssm:GetDeployablePatchSnapshotForInstance",
+        "ssm:GetDocument", "ssm:GetManifest", "ssm:ListAssociations", "ssm:ListInstanceAssociations",
+        "ssm:PutComplianceItems", "ssm:PutConfigurePackageResult", "ssm:PutInventory",
+        "ssm:UpdateAssociationStatus", "ssm:UpdateInstanceAssociationStatus", "ssm:UpdateInstanceInformation",
+        "ssmmessages:*", "ec2messages:*"
+      ],
+      "Resource": "*",
+      "Condition": { "ArnLike": { "aws:PrincipalArn": "__BOX_ROLES__" } }
+    },
+    {
+      "Sid": "DenyBoxWritesOutsideTelemetry",
+      "Effect": "Deny",
+      "Action": ["s3:AbortMultipartUpload", "s3:PutObject"],
+      "NotResource": [
+        "arn:aws:s3:::__TELEMETRY_BUCKET__/claude-code/*",
+        "arn:aws:s3:::__TELEMETRY_BUCKET__/session-logs/*"
+      ],
+      "Condition": { "ArnLike": { "aws:PrincipalArn": "__BOX_ROLES__" } }
+    },
+    {
+      "Sid": "DenyBoxReadsOutsideKit",
+      "Effect": "Deny",
+      "Action": "s3:GetObject",
+      "NotResource": "arn:aws:s3:::__ARTIFACT_BUCKET__/__ARTIFACT_PREFIX__scripts/*",
+      "Condition": { "ArnLike": { "aws:PrincipalArn": "__BOX_ROLES__" } }
+    },
+    {
+      "Sid": "DenyNonClaudeModels",
+      "Effect": "Deny",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "NotResource": [
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
+        "arn:aws:bedrock:*:*:inference-profile/*.anthropic.claude-*"
+      ]
+    },
+    {
+      "Sid": "DenyBedrockOutsideVpce",
+      "Effect": "Deny",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": { "aws:SourceVpce": "__VPCE_ID__" },
+        "ArnNotLike": { "aws:PrincipalArn": "__PLATFORM_PRINCIPALS__" }
+      }
+    }
+  ]
+}

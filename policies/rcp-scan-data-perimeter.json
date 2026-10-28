@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyAccessFromOutsideOrg",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": ["kms:*", "s3:*", "secretsmanager:*", "sqs:*", "sts:AssumeRole"],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": { "aws:PrincipalOrgID": "__ORG_ID__" },
+        "BoolIfExists": { "aws:PrincipalIsAWSService": "false" }
+      }
+    },
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": ["kms:*", "s3:*", "secretsmanager:*", "sqs:*", "sts:*"],
+      "Resource": "*",
+      "Condition": { "BoolIfExists": { "aws:SecureTransport": "false" } }
+    }
+  ]
+}

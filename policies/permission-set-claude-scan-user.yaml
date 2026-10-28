@@ -1,0 +1,177 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Security Scanning with Claude Code on AWS - IAM Identity Center permission set for box users (AuthMode = IdentityCenter): Claude on
+  Bedrock, Session Manager and start/stop for their own box only. Deploy in the Identity Center management
+  or delegated administrator account. Keep the inline policy in sync with permission-set-claude-scan-user.json.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Permission set" }
+        Parameters: [InstanceArn, PermissionSetName, SessionDurationHours]
+      - Label: { default: "Owner attribute (matches each box's Owner tag)" }
+        Parameters: [ConfigureOwnerAttribute, OwnerAttributeSource]
+      - Label: { default: "Optional assignment" }
+        Parameters: [AccountId, PrincipalType, PrincipalId]
+    ParameterLabels:
+      InstanceArn: { default: "Identity Center instance ARN" }
+      PermissionSetName: { default: "Permission set name (the shared stack's SsoRoleName)" }
+      SessionDurationHours: { default: "Session length (hours)" }
+      ConfigureOwnerAttribute: { default: "Configure the Owner attribute for access control?" }
+      OwnerAttributeSource: { default: "Identity Center attribute that holds the box Owner name" }
+      AccountId: { default: "Scanning account ID to assign to (blank = assign later)" }
+      PrincipalType: { default: "Assign to a GROUP or USER" }
+      PrincipalId: { default: "Group or user ID from the Identity Center console" }
+
+Parameters:
+  InstanceArn:
+    Type: String
+    AllowedPattern: ^arn:aws[a-z-]*:sso:::instance/ssoins-[a-f0-9]{16}$
+    Description: IAM Identity Center console > Settings > Instance ARN
+  PermissionSetName:
+    Type: String
+    Default: ClaudeScanUser
+    AllowedPattern: ^[\w+=,.@-]{1,32}$
+  SessionDurationHours:
+    Type: Number
+    Default: 8
+    MinValue: 1
+    MaxValue: 12
+    Description: Longer sessions mean fewer re-logins during long scans
+  ConfigureOwnerAttribute:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+    Description: >-
+      Instance-wide setting. Choose No if attributes for access control are already configured in this
+      Identity Center instance, and add an 'Owner' key there yourself.
+  OwnerAttributeSource:
+    Type: String
+    Default: ${path:userName}
+    Description: >-
+      Value passed as the Owner session tag. Each user's value must equal the Owner parameter of their box
+      (lowercase letters, digits, hyphens), so pick an attribute that fits, e.g. ${path:userName} for short
+      user names, or a custom attribute from your identity source.
+  AccountId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^(|\d{12})$
+  PrincipalType:
+    Type: String
+    AllowedValues: [GROUP, USER]
+    Default: GROUP
+  PrincipalId:
+    Type: String
+    Default: ""
+
+Conditions:
+  ConfigureOwnerAttribute: !Equals [!Ref ConfigureOwnerAttribute, "Yes"]
+  Assign: !And [!Not [!Equals [!Ref AccountId, ""]], !Not [!Equals [!Ref PrincipalId, ""]]]
+
+Resources:
+  # Puts each user's Owner value on their sessions as aws:PrincipalTag/Owner
+  OwnerAttribute:
+    Type: AWS::SSO::InstanceAccessControlAttributeConfiguration
+    Condition: ConfigureOwnerAttribute
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      AccessControlAttributes:
+        - Key: Owner
+          Value:
+            Source: [!Ref OwnerAttributeSource]
+
+  PermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      Name: !Ref PermissionSetName
+      Description: Security Scanning with Claude Code on AWS - box user, Claude on Bedrock and access to their own box only
+      SessionDuration: !Sub PT${SessionDurationHours}H
+      InlinePolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: BedrockClaude
+            Effect: Allow
+            Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, bedrock:CountTokens]
+            Resource:
+              - arn:aws:bedrock:*::foundation-model/anthropic.claude-*
+              - arn:aws:bedrock:*:*:inference-profile/*.anthropic.claude-*
+          - Sid: BedrockProfiles
+            Effect: Allow
+            Action: bedrock:GetInferenceProfile
+            Resource: arn:aws:bedrock:*:*:inference-profile/*.anthropic.claude-*
+          - Sid: BedrockDiscovery
+            Effect: Allow
+            Action: [bedrock:ListInferenceProfiles, bedrock:ListFoundationModels]
+            Resource: "*"
+          - Sid: BedrockShortTermKeys
+            Effect: Allow
+            Action: bedrock:CallWithBearerToken
+            Resource: "*"
+            Condition:
+              StringEquals:
+                bedrock:bearerTokenType: SHORT_TERM
+          - Sid: BedrockModelSubscription
+            Effect: Allow
+            Action: [aws-marketplace:Subscribe, aws-marketplace:ViewSubscriptions]
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:CalledViaLast: bedrock.amazonaws.com
+          - Sid: SessionToOwnBox
+            Effect: Allow
+            Action: ssm:StartSession
+            Resource: arn:aws:ec2:*:*:instance/*
+            Condition:
+              StringEquals:
+                ssm:resourceTag/Owner: ${aws:PrincipalTag/Owner}
+          - Sid: SessionDocuments
+            Effect: Allow
+            Action: ssm:StartSession
+            Resource:
+              - arn:aws:ssm:*:*:document/SSM-SessionManagerRunShell
+              - arn:aws:ssm:*::document/AWS-StartInteractiveCommand
+          - Sid: OwnSessions
+            Effect: Allow
+            Action: [ssm:TerminateSession, ssm:ResumeSession]
+            Resource: arn:aws:ssm:*:*:session/*
+            Condition:
+              StringLike:
+                ssm:resourceTag/aws:ssmmessages:session-id: ["${aws:userid}"]
+          - Sid: StartStopOwnBox
+            Effect: Allow
+            Action: [ec2:StartInstances, ec2:StopInstances]
+            Resource: arn:aws:ec2:*:*:instance/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Owner: ${aws:PrincipalTag/Owner}
+          - Sid: ConsoleConnect
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - ssm:DescribeInstanceInformation
+              - ssm:DescribeInstanceProperties
+              - ssm:DescribeSessions
+              - ssm:GetConnectionStatus
+            Resource: "*"
+
+  Assignment:
+    Type: AWS::SSO::Assignment
+    Condition: Assign
+    Properties:
+      InstanceArn: !Ref InstanceArn
+      PermissionSetArn: !GetAtt PermissionSet.PermissionSetArn
+      TargetType: AWS_ACCOUNT
+      TargetId: !Ref AccountId
+      PrincipalType: !Ref PrincipalType
+      PrincipalId: !Ref PrincipalId
+
+Outputs:
+  PermissionSetName:
+    Description: The shared stack's SsoRoleName (default ClaudeScanUser)
+    Value: !Ref PermissionSetName
+  PermissionSetArn:
+    Value: !GetAtt PermissionSet.PermissionSetArn

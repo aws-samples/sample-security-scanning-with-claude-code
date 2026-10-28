@@ -1,0 +1,447 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Security Scanning with Claude Code on AWS - VPC with a private subnet, NAT egress and flow logs, plus the interface endpoints boxes use;
+  or only those endpoints, in an existing VPC (nested in shared.yaml)
+
+Parameters:
+  CreateVpc:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.42.0.0/24
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.42.1.0/24
+  ExistingVpcId:
+    Type: String
+    Default: ""
+  ExistingSubnetId:
+    Type: String
+    Default: ""
+  ExistingVpcCidrs:
+    Type: String
+    Default: ""
+    Description: Up to 4 comma-separated CIDR blocks of the existing VPC; the endpoints accept HTTPS from all of them
+  # Comma-separated: ssm (ssm, ssmmessages, ec2messages), bedrock-runtime, bedrock, logs, cloudformation; or none
+  Endpoints:
+    Type: String
+    Default: ssm,bedrock-runtime,bedrock,logs,cloudformation
+  ExistingBedrockVpceId:
+    Type: String
+    Default: none
+
+Conditions:
+  CreateVpc: !Equals [!Ref CreateVpc, "Yes"]
+  # ",x," in ",<Endpoints>," - splitting on it and joining back changes the string only if it's there
+  Ssm: !Not [!Equals [!Join ["", !Split [",ssm,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
+  BedrockRuntime: !Not [!Equals [!Join ["", !Split [",bedrock-runtime,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
+  Bedrock: !Not [!Equals [!Join ["", !Split [",bedrock,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
+  Logs: !Not [!Equals [!Join ["", !Split [",logs,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
+  CloudFormation: !Not [!Equals [!Join ["", !Split [",cloudformation,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
+  AnyEndpoint: !Or [!Condition Ssm, !Condition BedrockRuntime, !Condition Bedrock, !Condition Logs, !Condition CloudFormation]
+  # 2nd-4th CIDR of an existing VPC (",,," keeps Select in range when there are fewer)
+  ExistingCidr2: !And
+    - !Condition AnyEndpoint
+    - !Not [!Condition CreateVpc]
+    - !Not [!Equals [!Select [1, !Split [",", !Join ["", [!Ref ExistingVpcCidrs, ",,,"]]]], ""]]
+  ExistingCidr3: !And
+    - !Condition AnyEndpoint
+    - !Not [!Condition CreateVpc]
+    - !Not [!Equals [!Select [2, !Split [",", !Join ["", [!Ref ExistingVpcCidrs, ",,,"]]]], ""]]
+  ExistingCidr4: !And
+    - !Condition AnyEndpoint
+    - !Not [!Condition CreateVpc]
+    - !Not [!Equals [!Select [3, !Split [",", !Join ["", [!Ref ExistingVpcCidrs, ",,,"]]]], ""]]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Condition: CreateVpc
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true   # required for private DNS on interface endpoints
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateVpc
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-private
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateVpc
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Internet egress for git clones, package installs and Claude Code updates
+  NatEip:
+    Type: AWS::EC2::EIP
+    Condition: CreateVpc
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      AllocationId: !GetAtt NatEip.AllocationId
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateVpc
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+  PrivateSubnetRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateVpc
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # In an existing VPC, private DNS sends every instance's calls to these services through the endpoints,
+  # so they accept HTTPS from all of the VPC's CIDR blocks, not only the box subnet
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: AnyEndpoint
+    Properties:
+      GroupDescription: HTTPS from the VPC to interface endpoints
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - Description: HTTPS from instances in the VPC to the endpoints
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !If [CreateVpc, !Ref VpcCidr, !Select [0, !Split [",", !Ref ExistingVpcCidrs]]]
+      # Endpoints only answer connections (security groups are stateful), so no other egress is needed
+      SecurityGroupEgress:
+        - Description: HTTPS within the VPC only
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !If [CreateVpc, !Ref VpcCidr, !Select [0, !Split [",", !Ref ExistingVpcCidrs]]]
+  EndpointIngressCidr2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: ExistingCidr2
+    Properties:
+      GroupId: !Ref EndpointSecurityGroup
+      Description: HTTPS from instances in the VPC to the endpoints
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: !Select [1, !Split [",", !Ref ExistingVpcCidrs]]
+  EndpointIngressCidr3:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: ExistingCidr3
+    Properties:
+      GroupId: !Ref EndpointSecurityGroup
+      Description: HTTPS from instances in the VPC to the endpoints
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: !Select [2, !Split [",", !Ref ExistingVpcCidrs]]
+  EndpointIngressCidr4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: ExistingCidr4
+    Properties:
+      GroupId: !Ref EndpointSecurityGroup
+      Description: HTTPS from instances in the VPC to the endpoints
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: !Select [3, !Split [",", !Ref ExistingVpcCidrs]]
+
+  # Network-level audit trail; the NAT allows outbound internet, so this is how egress is reviewed
+  FlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateVpc
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: Flow logs hold connection metadata only and are encrypted at rest by CloudWatch Logs by default
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: Flow logs hold connection metadata only and are encrypted at rest by CloudWatch Logs by default
+    Properties:
+      LogGroupName: !Sub /claude-scan/${AWS::StackName}/vpc-flow-logs
+      RetentionInDays: 90
+  FlowLogRole:
+    Type: AWS::IAM::Role
+    Condition: CreateVpc
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: logs:DescribeLogGroups supports only Resource "*"; the write actions are scoped to the flow log group
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: vpc-flow-logs.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: flow-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !Sub ${FlowLogGroup.Arn}
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+  FlowLog:
+    Type: AWS::EC2::FlowLog
+    Condition: CreateVpc
+    Properties:
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref FlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+
+  # Endpoint policies. bedrock-runtime takes model calls by this account's principals only. In a VPC the kit
+  # builds, the other endpoints take only this account's principals too. In your own VPC they keep the default
+  # policy: private DNS sends every workload's calls through them, including other accounts' roles and
+  # cfn-signal's unsigned instance-identity calls.
+
+  # The optional agent-perimeter SCP denies model calls that don't arrive through this endpoint
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: BedrockRuntime
+    Properties:
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-runtime
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Model calls only, by this account's principals (CallWithBearerToken covers the sandbox's short-term keys)
+          - Effect: Allow
+            Principal: "*"
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:CountTokens
+              - bedrock:CallWithBearerToken
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+
+  # Bedrock control plane: Claude Code's model and inference-profile lookups
+  BedrockEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: Bedrock
+    Properties:
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PolicyDocument: !If
+        - CreateVpc
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+        - !Ref AWS::NoValue
+
+  # Session Manager: the only way to connect to a box
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: Ssm
+    Properties:
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PolicyDocument: !If
+        - CreateVpc
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+        - !Ref AWS::NoValue
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: Ssm
+    Properties:
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PolicyDocument: !If
+        - CreateVpc
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+        - !Ref AWS::NoValue
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: Ssm
+    Properties:
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PolicyDocument: !If
+        - CreateVpc
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+        - !Ref AWS::NoValue
+
+  # CloudWatch Logs: heartbeat metric, bootstrap failure reports, live session recordings
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: Logs
+    Properties:
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PolicyDocument: !If
+        - CreateVpc
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+        - !Ref AWS::NoValue
+
+  # The box's setup signal (cfn-signal); without a path to it the box stack waits out its timeout
+  CloudFormationEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CloudFormation
+    Properties:
+      VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.cloudformation
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PolicyDocument: !If
+        - CreateVpc
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "*"
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  aws:PrincipalAccount: !Ref AWS::AccountId
+        - !Ref AWS::NoValue
+
+Outputs:
+  VpcId:
+    Value: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+  PrivateSubnetId:
+    Value: !If [CreateVpc, !Ref PrivateSubnet, !Ref ExistingSubnetId]
+  PrivateRouteTableId:
+    Value: !If [CreateVpc, !Ref PrivateRouteTable, "none"]
+  BedrockRuntimeVpceId:
+    Value: !If [BedrockRuntime, !Ref BedrockRuntimeEndpoint, !Ref ExistingBedrockVpceId]
