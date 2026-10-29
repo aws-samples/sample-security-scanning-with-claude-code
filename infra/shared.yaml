@@ -18,7 +18,7 @@ Metadata:
       - Label: { default: "Claude models (every box)" }
         Parameters: [ClaudeModel, ExtraModelId, ExtraModelName, ExtraModelCapabilities, ExtraModelContextTokens]
       - Label: { default: "Network" }
-        Parameters: [CreateNetwork, VpcCidr, ExistingVpcId, ExistingSubnetId, ExistingVpcCidrs, ExistingRouteTableIds, InterfaceEndpoints, ExistingBedrockVpceId, CreateS3GatewayEndpoint, CorporateCaBundleKey]
+        Parameters: [CreateNetwork, VpcCidr, PublicSubnetCidr, PrivateSubnetCidr, ExistingVpcId, ExistingSubnetId, ExistingVpcCidrs, ExistingRouteTableIds, InterfaceEndpoints, ExistingBedrockVpceId, CreateS3GatewayEndpoint, CorporateCaBundleKey]
       - Label: { default: "Telemetry bucket" }
         Parameters: [CreateBucket, RetentionDays, ExistingBucketName, ExistingKmsKeyArn]
       - Label: { default: "Audit and detection" }
@@ -41,6 +41,8 @@ Metadata:
       ExtraModelContextTokens: { default: "Extra model's context window in tokens (blank = 200K)" }
       CreateNetwork: { default: "Create a new VPC?" }
       VpcCidr: { default: "New VPC CIDR" }
+      PublicSubnetCidr: { default: "New VPC's public subnet CIDR (NAT gateway)" }
+      PrivateSubnetCidr: { default: "New VPC's private subnet CIDR (boxes)" }
       ExistingVpcId: { default: "Existing VPC ID" }
       ExistingSubnetId: { default: "Existing private subnet ID (boxes launch here)" }
       ExistingVpcCidrs: { default: "Existing VPC CIDR blocks (comma-separated, needed for interface endpoints)" }
@@ -153,6 +155,19 @@ Parameters:
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
+    AllowedPattern: ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(1[6-9]|2[0-8])$
+    ConstraintDescription: an IPv4 CIDR block from /16 to /28
+    Description: Change PublicSubnetCidr and PrivateSubnetCidr with it; both must be inside this block
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.42.0.0/24
+    AllowedPattern: ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(1[6-9]|2[0-8])$
+    ConstraintDescription: an IPv4 CIDR block from /16 to /28, inside VpcCidr
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.42.1.0/24
+    AllowedPattern: ^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])/(1[6-9]|2[0-8])$
+    ConstraintDescription: an IPv4 CIDR block from /16 to /28, inside VpcCidr
   ExistingVpcId:
     Type: String
     Default: ""
@@ -175,13 +190,14 @@ Parameters:
   InterfaceEndpoints:
     Type: String
     Default: auto
-    AllowedPattern: ^(auto|none|(ssm|bedrock-runtime|bedrock|logs|cloudformation)(,(ssm|bedrock-runtime|bedrock|logs|cloudformation))*)$
-    ConstraintDescription: auto, none, or a comma-separated list (no spaces) of ssm, bedrock-runtime, bedrock, logs, cloudformation
+    AllowedPattern: ^(auto|none|(ssm|ec2messages|bedrock-runtime|bedrock|logs|cloudformation)(,(ssm|ec2messages|bedrock-runtime|bedrock|logs|cloudformation))*)$
+    ConstraintDescription: auto, none, or a comma-separated list (no spaces) of ssm, ec2messages, bedrock-runtime, bedrock, logs, cloudformation
     Description: >-
-      auto = all five when this stack creates the VPC, none in an existing VPC. ssm = ssm, ssmmessages and ec2messages
-      (Session Manager); bedrock-runtime = model calls; bedrock = model and inference-profile lookups; logs = CloudWatch
-      Logs (heartbeat, failure reports, session recordings); cloudformation = the box's setup signal. About $7.30 a month
-      each (ssm is three). In an existing VPC, private DNS sends every instance's calls to these services through the new
+      auto = ssm, bedrock-runtime, bedrock, logs and cloudformation when this stack creates the VPC, none in an existing
+      VPC. ssm = ssm and ssmmessages (Session Manager); ec2messages = only for SSM Agent versions before 3.3.40 (not
+      offered in newer Regions); bedrock-runtime = model calls; bedrock = model and inference-profile lookups; logs =
+      CloudWatch Logs (heartbeat, failure reports, session recordings); cloudformation = the box's setup signal. About
+      $7.30 a month each (ssm is two). In an existing VPC, private DNS sends every instance's calls to these services through the new
       endpoints - list only services the VPC has no endpoint for yet (creating a duplicate fails).
   ExistingBedrockVpceId:
     Type: String
@@ -236,7 +252,7 @@ Parameters:
     Type: String
     AllowedValues: ["Yes", "No"]
     Default: "Yes"
-    Description: Account-wide - replaces any existing Bedrock invocation logging configuration in this region
+    Description: Account-wide - sets Bedrock invocation logging in this region; fails if logging is already configured (then set No)
   LogRetentionDays:
     Type: Number
     Default: 365
@@ -322,6 +338,8 @@ Resources:
       Parameters:
         CreateVpc: !Ref CreateNetwork
         VpcCidr: !Ref VpcCidr
+        PublicSubnetCidr: !Ref PublicSubnetCidr
+        PrivateSubnetCidr: !Ref PrivateSubnetCidr
         ExistingVpcId: !Ref ExistingVpcId
         ExistingSubnetId: !Ref ExistingSubnetId
         ExistingVpcCidrs: !Ref ExistingVpcCidrs
@@ -775,23 +793,57 @@ Resources:
           import boto3
           import cfnresponse
 
+          # Invocation logging is one setting per account and Region. The stack sets it only when none
+          # exists, and removes it only if it set it and the setting still points to the stack's bucket.
+          OWNED = "bedrock-invocation-logging"
+          NOT_OWNED = "bedrock-invocation-logging-not-configured"
+          PREFIX = "bedrock-logs"
+
+          def points_to(config, buckets):
+              s3 = (config or {}).get("s3Config") or {}
+              return s3.get("bucketName") in buckets and s3.get("keyPrefix") == PREFIX
+
+          def describe(config):
+              where = []
+              s3 = config.get("s3Config") or {}
+              if s3.get("bucketName"):
+                  where.append(f"s3://{s3['bucketName']}/{s3.get('keyPrefix', '')}")
+              cw = config.get("cloudWatchConfig") or {}
+              if cw.get("logGroupName"):
+                  where.append(f"log group {cw['logGroupName']}")
+              return ", ".join(where) or "another destination"
+
           def handler(event, context):
               props = event["ResourceProperties"]
+              bucket = props["BucketName"]
+              physical_id = event.get("PhysicalResourceId", NOT_OWNED)
               bedrock = boto3.client("bedrock")
               try:
-                  if event["RequestType"] in ("Create", "Update"):
-                      bedrock.put_model_invocation_logging_configuration(loggingConfig={
-                          "s3Config": {"bucketName": props["BucketName"], "keyPrefix": "bedrock-logs"},
-                          "textDataDeliveryEnabled": True,
-                          "imageDataDeliveryEnabled": False,
-                          "embeddingDataDeliveryEnabled": False,
-                      })
-                  else:
-                      bedrock.delete_model_invocation_logging_configuration()
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "bedrock-invocation-logging")
+                  current = bedrock.get_model_invocation_logging_configuration().get("loggingConfig")
+                  if event["RequestType"] == "Delete":
+                      if physical_id == OWNED and points_to(current, [bucket]):
+                          bedrock.delete_model_invocation_logging_configuration()
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, physical_id)
+                      return
+                  ours = [bucket]
+                  if event["RequestType"] == "Update" and physical_id == OWNED:
+                      ours.append(event["OldResourceProperties"]["BucketName"])
+                  if current and not points_to(current, ours):
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {},
+                                       physical_id if event["RequestType"] == "Update" else NOT_OWNED,
+                                       reason="Bedrock model invocation logging is already configured in this account and Region "
+                                              f"({describe(current)}). The stack doesn't replace it: set ConfigureBedrockLogging = No.")
+                      return
+                  bedrock.put_model_invocation_logging_configuration(loggingConfig={
+                      "s3Config": {"bucketName": bucket, "keyPrefix": PREFIX},
+                      "textDataDeliveryEnabled": True,
+                      "imageDataDeliveryEnabled": False,
+                      "embeddingDataDeliveryEnabled": False,
+                  })
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, OWNED)
               except Exception as e:
-                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, "bedrock-invocation-logging",
-                                   reason=str(e)[:500])
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {},
+                                   physical_id if event["RequestType"] != "Create" else NOT_OWNED, reason=str(e)[:500])
   BedrockInvocationLogging:
     Type: Custom::BedrockInvocationLogging
     Condition: ConfigureBedrockLogging

@@ -3,76 +3,157 @@
 # SPDX-License-Identifier: MIT-0
 # Anthropic's defending-code-reference-harness on the Claude scan box. Run ON the box as the claude user.
 # Usage:
-#   scan-harness.sh setup                   # clone (or update) the harness from main
-#   scan-harness.sh scan <git-url|dir>      # clone/pull the repo into ~/scan-targets, then headless static scan:
-#                                           #   threat model -> vuln scan -> triage
+#   scan-harness.sh setup                   # clone the harness and check out the pinned commit (HARNESS_REF)
+#   scan-harness.sh scan <git-url|dir>      # headless static scan of a fresh copy of the repo, as the
+#                                           #   claude-scanner user: threat model -> vuln scan -> triage
 #   scan-harness.sh sandbox                 # optional: Docker + gVisor + Bedrock key for the autonomous C/C++ pipeline
 #   scan-harness.sh token                   # (re)mint the short-term Bedrock API key the sandboxed agents use
 #   scan-harness.sh run <target> [args...]  # sandboxed autonomous pipeline on a harness target (e.g. drlibs)
-# Override with env: HARNESS_DIR, TARGETS_DIR, RESULTS_DIR, MODEL, AWS_REGION
+# Override with env: HARNESS_DIR, HARNESS_REF, RESULTS_DIR, MODEL, AWS_REGION
 set -euo pipefail
 
 HARNESS_URL=https://github.com/anthropics/defending-code-reference-harness
+# The harness commit this kit was tested with; HARNESS_REF=main scan-harness.sh setup moves to the latest
+HARNESS_REF="${HARNESS_REF:-d3bea6b5793b5f3d59a75ebe69a58efa88383145}"
 HARNESS_DIR="${HARNESS_DIR:-$HOME/defending-code-reference-harness}"
-TARGETS_DIR="${TARGETS_DIR:-$HOME/scan-targets}"
 RESULTS_DIR="${RESULTS_DIR:-$HOME/scan-results}"
 # Default to the model the box was configured with (blank = Claude Code's default)
 MODEL="${MODEL:-$(jq -r '.env.ANTHROPIC_MODEL // empty' /etc/claude-code/managed-settings.json 2>/dev/null || true)}"
 ENV_FILE="$HOME/.config/dcrh/bedrock.env"
 SELF="$(readlink -f "$0")"
+# Headless scans run as this user (set up by the box's harness module)
+SCANNER=claude-scanner
+SCANS_DIR=/var/lib/claude-scan/scans
+TOKEN_PY=/usr/local/lib/claude-scan/bedrock-token/bin/python3
 
 die() { echo "error: $*" >&2; exit 1; }
 
-# claude invocation with the model pinned for the session and its subagents, when one is set
-claude_cmd() {
-  if [[ -n $MODEL ]]; then CLAUDE_CODE_SUBAGENT_MODEL="$MODEL" claude --model "$MODEL" "$@"; else claude "$@"; fi
-}
-
-repo_name() { basename "${1%.git}"; }
-
-clone_or_pull() {
-  if [[ -d $2/.git ]]; then git -C "$2" pull --ff-only; else git clone "$1" "$2"; fi
-}
-
-# --- Static scan (skills only read source and write reports; no sandbox needed) ---
-
 setup() {
-  clone_or_pull "$HARNESS_URL" "$HARNESS_DIR"
+  [[ -d $HARNESS_DIR/.git ]] || git clone -q "$HARNESS_URL" "$HARNESS_DIR"
+  git -C "$HARNESS_DIR" fetch -q origin
+  git -C "$HARNESS_DIR" checkout -q --detach "$HARNESS_REF"
   cat <<EOF
 
-Harness: $HARNESS_DIR (main @ $(git -C "$HARNESS_DIR" rev-parse --short HEAD))
+Harness: $HARNESS_DIR (@ $(git -C "$HARNESS_DIR" rev-parse --short HEAD))
 Next:    $SELF scan <git-url|dir>   (headless; use tmux)
    or:   cd $HARNESS_DIR && claude      (interactive: /threat-model, /vuln-scan, /triage, /patch)
 EOF
 }
 
-# Each skill's allowed-tools frontmatter pre-approves only file tools + read-only Bash,
-# so headless runs can't do anything else. --add-dir lets them write reports into the target.
+# --- Headless static scan ---
+# The harness skills' allowed-tools only pre-approve tools (including git, find and gh api); they don't stop
+# anything else, and the repository under scan can steer the agent. So each scan runs on a fresh copy of the
+# repository and the harness, as the claude-scanner user: no sudo, no access to your home directory or your
+# AWS sign-in, only a short-term Bedrock API key, and firewall rules that allow only the VPC's endpoints (no
+# internet, no instance metadata). Telemetry is recorded as for your own sessions.
+
+# host/org/repo for a Git URL, local/<path> for a directory: results of different repositories never mix
+target_name() {
+  local t=$1 url_re='^(https?|ssh)://([^/@]*@)?([^/:]+)(:[0-9]+)?/(.+)$' scp_re='^[^@/]+@([^:/]+):(.+)$'
+  if [[ $t =~ $url_re ]]; then t="${BASH_REMATCH[3]}/${BASH_REMATCH[5]}"
+  elif [[ $t =~ $scp_re ]]; then t="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  else t="local$t"; fi
+  t=${t%/}; t=${t%.git}
+  [[ /$t/ != */../* ]] || die "unexpected '..' in $1"
+  printf '%s' "$t" | tr -c 'A-Za-z0-9._/-' '_'
+}
+
+# A Bedrock API key minted from your current sign-in: it can only call Bedrock and expires with that session
+mint_key() {
+  [[ -x $TOKEN_PY ]] || die "Bedrock key tool missing; run: sudo claude-scan-bootstrap --only harness"
+  "$TOKEN_PY" -I -c '
+import sys
+from botocore.session import Session
+from aws_bedrock_token_generator import provide_token
+if Session().get_credentials() is None:
+    sys.exit("no AWS credentials - sign in first (see the login banner)")
+print(provide_token(region=sys.argv[1]))' "$(region)"
+}
+
+# claude-scanner has no internet path: model calls must reach Bedrock through the VPC's endpoint
+bedrock_in_vpc() {
+  python3 -I -c '
+import ipaddress, socket, sys
+ip = ipaddress.ip_address(socket.gethostbyname(sys.argv[1]))
+sys.exit(0 if any(ip in ipaddress.ip_network(c) for c in open(sys.argv[2]).read().split()) else 1)' \
+    "bedrock-runtime.$(region).amazonaws.com" /etc/claude-scan/scanner-vpc-cidrs 2>/dev/null
+}
+
+# The scan's staging and run directories: global, so the EXIT trap still sees them after scan returns
+stage="" run=""
+
 scan() {
-  local dir out
-  [[ -d $HARNESS_DIR/.claude/skills ]] || die "harness not found at $HARNESS_DIR (run setup first)"
-  if [[ $1 =~ ^(https?://|git@|ssh://) ]]; then
-    dir="$TARGETS_DIR/$(repo_name "$1")"
-    mkdir -p "$TARGETS_DIR"
-    clone_or_pull "$1" "$dir"
+  local target=$1 name started out commit harness_commit
+  [[ -d $HARNESS_DIR/.git ]] || die "harness not found at $HARNESS_DIR (run setup first)"
+  id "$SCANNER" >/dev/null 2>&1 || die "the $SCANNER user is missing; run: sudo claude-scan-bootstrap --only harness"
+  sudo nft list table inet claude_scanner >/dev/null 2>&1 ||
+    die "the $SCANNER firewall rules aren't loaded; run: sudo systemctl restart claude-scan-scanner-firewall"
+  bedrock_in_vpc || die "bedrock-runtime.$(region).amazonaws.com doesn't resolve to a VPC endpoint; headless scans need the bedrock-runtime and bedrock interface endpoints (shared stack InterfaceEndpoints)"
+
+  started=$(date -u +%Y%m%dT%H%M%SZ)
+  if [[ $target =~ ^(https?://|git@|ssh://) ]]; then
+    name=$(target_name "$target")
   else
-    dir=$(readlink -f "$1")
-    [[ -d $dir ]] || die "no such directory: $1"
+    target=$(readlink -f "$target")
+    [[ -d $target ]] || die "no such directory: $1"
+    name=$(target_name "$target")
   fi
-  out="$RESULTS_DIR/$(basename "$dir")/$(date -u +%Y%m%dT%H%M%SZ)"
+  out="$RESULTS_DIR/$name/$started"
   mkdir -p "$out"
+  info() { jq -n --arg status "$1" --arg step "${2:-}" --arg message "${3:-}" --arg target "$target" \
+    --arg commit "${commit:-}" --arg harness "${harness_commit:-}" --arg model "$MODEL" --arg started "$started" \
+    --arg kit "$(cat /etc/claude-scan/kit-version 2>/dev/null || echo unknown)" \
+    '{status: $status, failed_step: $step, message: $message, target: $target, commit: $commit,
+      harness_commit: $harness, model: $model, kit_version: $kit, started_at: $started,
+      finished_at: (now | todate)}' > "$out/SCAN-INFO.json"; }
+  fail() { info failed "$1" "$2"; die "$1: $2 (details: $out)"; }
 
-  skill() {
-    echo "== $2"
-    (cd "$HARNESS_DIR" && claude_cmd -p "$1" --add-dir "$dir") 2>&1 | tee "$out/$2.log"
+  # Fresh copies of the repository and the pinned harness, so nothing from an earlier run is reused
+  stage=$(mktemp -d)
+  run="$SCANS_DIR/$started-$$"
+  trap '[[ -z $stage ]] || rm -rf "$stage"; [[ -z $run ]] || sudo rm -rf "$run"' EXIT
+  if [[ -d $target ]]; then cp -a "$target" "$stage/src"; else git clone -q -- "$target" "$stage/src" || fail clone "git clone failed"; fi
+  rm -f "$stage/src/THREAT_MODEL.md" "$stage/src/VULN-FINDINGS.json" "$stage/src/VULN-FINDINGS.md"
+  commit=$(git -C "$stage/src" rev-parse HEAD 2>/dev/null || echo none)
+  harness_commit=$(git -C "$HARNESS_DIR" rev-parse HEAD)
+  mkdir "$stage/harness"
+  git -C "$HARNESS_DIR" archive HEAD | tar -x -C "$stage/harness"
+
+  sudo install -d -o "$SCANNER" -g "$SCANNER" -m 700 "$run"
+  sudo cp -a "$stage/src" "$stage/harness" "$run/"
+  sudo chown -R "$SCANNER:$SCANNER" "$run"
+  mint_key | sudo -u "$SCANNER" sh -c 'umask 077; sed "s/^/export AWS_BEARER_TOKEN_BEDROCK=/" > "$1"' _ "$run/bedrock.env" ||
+    fail key "could not mint a Bedrock API key (sign in first; see the login banner)"
+
+  # $1 = step name, $2 = prompt. A clean environment: none of your variables, credentials or files.
+  step() {
+    echo "== $1"
+    sudo -u "$SCANNER" -H env -i HOME="/home/$SCANNER" PATH="/home/$SCANNER/.local/bin:/usr/bin:/bin" \
+      LANG=C.UTF-8 ${MODEL:+CLAUDE_CODE_SUBAGENT_MODEL="$MODEL"} \
+      bash -c 'source "$1/bedrock.env"; cd "$1/harness"; shift; exec claude "$@" </dev/null' _ "$run" \
+      -p "$2" --add-dir "$run/src" --disallowedTools WebFetch WebSearch ${MODEL:+--model "$MODEL"} 2>&1 |
+      tee "$out/$1.log" || fail "$1" "claude exited with an error (see $1.log)"
   }
-  skill "/threat-model bootstrap $dir" threat-model
-  skill "/vuln-scan $dir" vuln-scan
-  skill "/triage $dir/VULN-FINDINGS.json --repo $dir --auto" triage
+  # Reports must exist and be complete: an empty or partial run fails instead of looking like a result
+  check() {   # $1 = step, $2 = file in $run, $3 = jq test (optional)
+    sudo test -s "$run/$2" || fail "$1" "$(basename "$2") wasn't written"
+    [[ -z ${3:-} ]] || sudo cat "$run/$2" | jq -e "$3" >/dev/null 2>&1 || fail "$1" "$(basename "$2") isn't complete"
+  }
 
-  # threat-model and vuln-scan write into the target; triage writes to the harness cwd
-  cp "$dir"/THREAT_MODEL.md "$dir"/VULN-FINDINGS.json "$dir"/VULN-FINDINGS.md "$out/"
-  mv "$HARNESS_DIR"/TRIAGE.json "$HARNESS_DIR"/TRIAGE.md "$out/"
+  step threat-model "/threat-model bootstrap $run/src"
+  check threat-model src/THREAT_MODEL.md
+  step vuln-scan "/vuln-scan $run/src"
+  check vuln-scan src/VULN-FINDINGS.json '.findings | type == "array"'
+  check vuln-scan src/VULN-FINDINGS.md
+  step triage "/triage $run/src/VULN-FINDINGS.json --repo $run/src --auto"
+  check triage harness/TRIAGE.json '.triage_completed == true'
+  check triage harness/TRIAGE.md
+
+  for f in src/THREAT_MODEL.md src/VULN-FINDINGS.json src/VULN-FINDINGS.md harness/TRIAGE.json harness/TRIAGE.md; do
+    # shellcheck disable=SC2024  # the copy belongs to you; sudo only reads claude-scanner's file
+    sudo cat "$run/$f" > "$out/$(basename "$f")"
+  done
+  info ok
   echo "Results: $out"
   ls -1 "$out"
 }

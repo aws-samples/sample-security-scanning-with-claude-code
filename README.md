@@ -7,17 +7,18 @@ cybersecurity models like Claude Mythos to find, triage and fix vulnerabilities 
 
 **Why isolated boxes?** AI-assisted vulnerability discovery clones untrusted repositories and lets an agent run
 commands and build code. This sample keeps that work off laptops and away from production: each user gets their
-own box with no inbound access, model calls use the user's own AWS identity, and every prompt, response, command
-and session is recorded in your AWS account. An administrator deploys everything from the AWS console: one shared
+own box with no inbound access, model calls use the user's own AWS identity, and prompts, responses, commands
+and sessions are recorded in your AWS account (see [Audit and detection](#audit-and-detection) for what each record
+covers). An administrator deploys everything from the AWS console: one shared
 setup per account and region, then one box per user.
 
 > **Note:** This sample is for evaluation and proof-of-concept use. Before you use it in production, apply the
 > steps in [Hardening for production](docs/hardening-for-production.md) and review it with your security team.
 
-> **Everything on a box is recorded.** Each user's terminal sessions, and all Claude Code activity
-> (prompts, Claude's responses, the commands it runs, and the file contents it reads) are captured for
-> audit and stored in the account's telemetry bucket, readable only by administrators. Tell users this
-> before they get a box.
+> **Activity on a box is recorded.** Each user's terminal sessions and Claude Code activity (prompts,
+> Claude's responses, the commands it runs, and the file contents it reads) are recorded for audit and
+> stored in the account's telemetry bucket, readable only by administrators. Tell users this before they
+> get a box.
 
 ## Use cases
 
@@ -74,11 +75,12 @@ sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
 | `scripts/box-bootstrap.sh` | Runs on each box at first boot (downloaded from your S3 bucket) and runs the setup modules below. |
 | `scripts/modules/` | One script per setup step: corporate CA, preflight checks, user, packages, telemetry, each toolchain, Claude Code, sign-in profile, settings, harness, banner, final checks. |
 | `scripts/VERSION` | The kit version (commit date and hash), filled in when you download the repository as a zip. Boxes show it in the login banner and in `/etc/claude-scan/kit-version`. |
-| `scripts/scan-harness.sh` | Helper that sets up the harness on each box. |
+| `scripts/scan-harness.sh` | Helper that sets up the harness on each box and runs headless scans as an isolated user. |
 | `scripts/claude-scan-doctor.sh` | The box health check users run when something doesn't work (`claude-scan-doctor`). |
 | `policies/` | The `ClaudeScanUser` Identity Center permission set, and optional AWS Organizations guardrails (SCPs and an RCP). |
 | `deploy.sh` | Optional command-line shortcut for the console steps below. |
 | `docs/hardening-for-production.md` | What to add before you use the sample in production. |
+| `docs/scan-harness.md` | How to use `scan-harness.sh`: headless scans, results, the autonomous pipeline, troubleshooting. |
 
 ## Prerequisites
 
@@ -166,7 +168,8 @@ tmux                                  # keeps long jobs alive if the connection 
 claude                                # Claude Code, ready to use
 ```
 
-Clone the code you want to review, or use the harness the box set up (see [About the harness](#about-the-harness)).
+Clone the code you want to review, or use the harness the box set up (see [About the harness](#about-the-harness)
+and [Using scan-harness.sh](docs/scan-harness.md)).
 
 **Scrolling in tmux:** the mouse wheel scrolls back through earlier output (the box sets `mouse on` and a
 50,000-line history). On Windows, use Windows Terminal rather than the legacy `cmd.exe` window, which
@@ -174,7 +177,12 @@ doesn't pass the mouse through. Without a mouse, press `Ctrl-b` then `[`, scroll
 press `q` to exit. To select text with your own terminal instead of tmux, hold Shift (Option in iTerm2)
 while dragging.
 
-## Sign-in modes
+## Configuration
+
+Details for customizing the shared and box stacks. The defaults work for most deployments; the setup steps
+link here where a choice matters.
+
+### Sign-in modes
 
 | Mode | Identity Bedrock sees | Credentials on the box | Notes |
 |---|---|---|---|
@@ -190,7 +198,7 @@ stack's `RequireMfa` option additionally requires `aws:MultiFactorAuthPresent` o
 Session Manager permissions. Leave it off until you've confirmed your users' sessions carry that flag, or
 they'll be locked out.
 
-## Shared parameters
+### Shared parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -204,7 +212,8 @@ they'll be locked out.
 | `ClaudeModel` | blank (Claude Code default) | Default model for every box: a Bedrock inference profile ID with your region's prefix - `us.` (US regions), `eu.` (Europe), `apac.` (Asia Pacific) or `global.` - for example `us.anthropic.claude-opus-5-5`. Users can still switch with `/model`. |
 | `ExtraModelId`, `ExtraModelName`, `ExtraModelCapabilities`, `ExtraModelContextTokens` | blank, blank, Mythos 5.1 values, blank | Adds a row to Claude Code's `/model` picker for a model it doesn't list itself, such as Claude Mythos. See [Adding Claude Mythos](#adding-claude-mythos-or-another-model-claude-code-doesnt-list). |
 | `CreateNetwork` | Yes | No = enter `ExistingVpcId`, `ExistingSubnetId` (private, with NAT), optionally `ExistingBedrockVpceId`. |
-| `InterfaceEndpoints` | `auto` | Interface VPC endpoints to create. `auto` = all five below when the stack creates the VPC, none with your own VPC. Or `none`, or a comma-separated list: `ssm` (ssm, ssmmessages, ec2messages: Session Manager), `bedrock-runtime` (model calls), `bedrock` (model and inference-profile lookups), `logs` (heartbeat, failure reports, session recordings), `cloudformation` (the box's setup signal). With your own VPC, see below. |
+| `VpcCidr`, `PublicSubnetCidr`, `PrivateSubnetCidr` | `10.42.0.0/16`, `10.42.0.0/24`, `10.42.1.0/24` | The new VPC's address ranges. Change them together: both subnets must be inside the VPC's block. |
+| `InterfaceEndpoints` | `auto` | Interface VPC endpoints to create. `auto` = all five below when the stack creates the VPC, none with your own VPC. Or `none`, or a comma-separated list: `ssm` (ssm, ssmmessages: Session Manager), `ec2messages` (only for SSM Agent versions before 3.3.40; not offered in newer Regions), `bedrock-runtime` (model calls), `bedrock` (model and inference-profile lookups), `logs` (heartbeat, failure reports, session recordings), `cloudformation` (the box's setup signal). With your own VPC, see below. |
 | `ExistingVpcCidrs` | blank | With your own VPC and `InterfaceEndpoints`: all of the VPC's CIDR blocks (up to 4). |
 | `CorporateCaBundleKey` | `none` | Only behind a TLS-inspecting firewall or proxy: upload its CA certificate (PEM) with the kit, e.g. `scripts/corporate-ca.pem`, and enter that path. Boxes add it to the system trust store and set `NODE_EXTRA_CA_CERTS`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` and `PIP_CERT`. |
 | `CreateS3GatewayEndpoint` | `auto` | `auto` = Yes with a new VPC, No with your own. `Yes` with your own VPC also needs `ExistingRouteTableIds` (the box subnet's route table). Skip if the VPC already has one. |
@@ -215,7 +224,7 @@ they'll be locked out.
 | `LogRetentionDays` | 365 | Live session recordings in CloudWatch Logs. |
 | `ExistingSessionLogGroupName` | blank | Only when re-creating a deleted shared stack under the same name: enter the kept `/claude-scan/<stack>/sessions` group to keep using it. |
 
-### Account-wide settings
+#### Account-wide settings
 
 Two settings apply to the **whole account in that region**, not just the boxes. That's why a dedicated
 account is recommended:
@@ -224,10 +233,12 @@ account is recommended:
   instance runs as the `claude` OS user and is recorded. Instances without a `claude` user can't be
   reached with Session Manager while this is on. Creating the stack fails if someone already saved
   preferences in this region (Session Manager console → Preferences); set this to No to keep yours.
-- **Bedrock model invocation logging** (`ConfigureBedrockLogging`): replaces any existing logging
-  configuration in this region, and deleting the stack turns logging off.
+- **Bedrock model invocation logging** (`ConfigureBedrockLogging`): sends every model call's request and
+  response in this region to the bucket. Creating the stack fails if logging is already configured in this
+  region (Bedrock console → Settings); set this to No to keep yours. Deleting the stack turns logging off only
+  if the stack set it and it still points to the stack's bucket.
 
-### Using your own VPC
+#### Using your own VPC
 
 The subnet must be private with outbound internet access (NAT), and the VPC must have DNS hostnames and
 DNS support enabled. Boxes reach GitHub, package repositories and Claude Code updates through the internet.
@@ -236,7 +247,7 @@ These AWS services should be reachable through VPC endpoints (or the NAT):
 | Service | Endpoint | Used for |
 |---|---|---|
 | S3 | `com.amazonaws.<region>.s3` (gateway) | Kit scripts, telemetry, session recordings, Amazon Linux packages |
-| Session Manager | `ssm`, `ssmmessages`, `ec2messages` | Connecting to boxes (there's no other way in) |
+| Session Manager | `ssm`, `ssmmessages` (and `ec2messages` for SSM Agent versions before 3.3.40) | Connecting to boxes (there's no other way in) |
 | Bedrock | `bedrock-runtime`, `bedrock` | Model calls; model and inference-profile lookups |
 | CloudWatch Logs | `logs` | Heartbeat, setup failure reports, live session recordings |
 | CloudFormation | `cloudformation` | The box's "setup finished" signal |
@@ -256,7 +267,7 @@ interface endpoints for your own VPC:
 - If the VPC already has a `bedrock-runtime` endpoint, enter its ID as `ExistingBedrockVpceId` (used by
   the optional agent-perimeter SCP).
 
-### Using your own bucket
+#### Using your own bucket
 
 The stack can't change an existing bucket's policies, so add these yourself:
 
@@ -278,7 +289,7 @@ The stack can't change an existing bucket's policies, so add these yourself:
 3. **Restrict reads to administrators**: the data includes prompts and source code.
 4. **Default encryption must be on** (all new buckets have it). Session recordings require it.
 
-## Box parameters
+### Box parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -288,11 +299,10 @@ The stack can't change an existing bucket's policies, so add these yourself:
 | `VolumeSize` | 100 GiB | |
 | `Toolchains` | all seven | Comma-separated, no spaces: `java` (Corretto 21, Maven), `node` (Node.js 22, TypeScript, tsx, pnpm, yarn), `python` (3.12, pip, uv), `go`, `rust` (with Cargo), `cpp` (GCC, Clang, Make, CMake, GDB), `dotnet` (.NET 8 SDK). `none` installs none. |
 | `ExtraPackages` | blank | More Amazon Linux packages, space-separated. |
-| `EnableSandbox` | false | Installs Docker, for harnesses that run the code under test in containers. |
 | `InstallHarness` | true | Clones Anthropic's open source defending-code reference harness. Claude Code and telemetry are always installed. |
 | `AutoStopIdleHours` | 4 | Stops the box after this many hours under 2% CPU. 0 = never. Users can start their own box again from the EC2 console (Instance state → Start). |
 
-### Adding Claude Mythos (or another model Claude Code doesn't list)
+#### Adding Claude Mythos (or another model Claude Code doesn't list)
 
 Claude Code ships with a fixed list of models. Claude Mythos 5.1 isn't on it, and access to it is gated by
 Anthropic per account, so the kit adds it only when you set these **shared stack** parameters. Every box in the
@@ -318,7 +328,7 @@ Users then pick **Mythos 5.1** in `/model`. To start every session on it, also s
 - **No policy changes needed:** the ID matches the kit's Claude-only IAM and SCP patterns, and the first call
   subscribes to its Marketplace listing through Bedrock, which the kit's policies allow.
 
-## Identity Center permission set
+### Identity Center permission set
 
 For `AuthMode = IdentityCenter`, don't sign users in with an administrator permission set. While a
 session is active, anything running on the box can use it, including code in a repo being scanned. Use
@@ -358,7 +368,7 @@ The shared stack's `SsoRoleName` defaults to `ClaudeScanUser`.
 3. Settings → Attributes for access control → add key `Owner` with your chosen attribute.
 4. AWS accounts → the scanning account → Assign users or groups → `ClaudeScanUser`.
 
-## IAM users
+### IAM users
 
 With `AuthMode = IamUser`, the shared stack creates an IAM group, `<shared stack>-users-<region>` (its
 **Outputs** → `UserGroup`), with the same permissions as the `ClaudeScanUser` permission set plus `aws login`.
@@ -371,18 +381,23 @@ For each user:
 on the box. A user without the tag can't connect to any box. Users sign in on the box with `aws login`
 (no access keys).
 
-## Audit and detection
+## Security and audit
+
+What the sample records, how boxes are isolated, and optional organization guardrails.
+
+### Audit and detection
 
 Users have full `sudo` on their box, so recording can't be enforced from inside it. Instead, several
-layers record activity, and the ones outside the box can't be switched off from it:
+layers record activity. The ones outside the box can't be switched off from it, but no single layer sees
+everything (see [What each layer can miss](#what-each-layer-can-miss)):
 
 | Layer | Where | Can a box user switch it off? | What it captures |
 |---|---|---|---|
 | Bedrock invocation logging | `s3://<bucket>/bedrock-logs/` | No (server-side) | Every model request and response with the caller's identity - including the commands Claude chose to run and their output, since both travel in the conversation. |
 | Session recordings | `s3://<bucket>/session-logs/` and CloudWatch Logs `/claude-scan/<shared-stack>/sessions` (live) | Partly - streamed output already sent is kept, and bucket versioning keeps the original if a recording is overwritten | Everything shown in the terminal. |
 | VPC flow logs | CloudWatch Logs `/claude-scan/<network-stack>/vpc-flow-logs` (kit-created VPC only, 90 days) | No | Every connection in and out of the VPC, including outbound internet traffic. |
-| Claude Code telemetry | `s3://<bucket>/claude-code/<owner>/{metrics,logs,traces}/` | Yes, as root - which triggers the alarm below | Sessions, tokens, cost, every prompt, response, tool call, command and tool output. |
-| Telemetry heartbeat alarm | CloudWatch alarm `claude-scan-<owner>-telemetry-silent` → SNS email | It fires precisely when someone does | The collector stopped while the box was running. |
+| Claude Code telemetry | `s3://<bucket>/claude-code/<owner>/{metrics,logs,traces}/` | Yes, as root - for example by changing Claude Code's settings, which no alarm detects | Sessions, tokens, cost, prompts, responses, tool calls, commands and tool output. |
+| Telemetry heartbeat alarm | CloudWatch alarm `claude-scan-<owner>-telemetry-silent` → SNS email | Stopping the collector triggers it | The collector stopped while the box was running. It doesn't fire if Claude Code stops sending telemetry while the collector keeps running. |
 | Telemetry delivery alarm | CloudWatch alarm `claude-scan-<owner>-telemetry-undelivered` → SNS email | It fires when telemetry stops leaving the box | For 15 minutes, telemetry has been piling up on the box instead of reaching the bucket, for example after a bucket, KMS key or S3 endpoint policy change. The box keeps it (up to 10,000 export requests, about half a day of continuous use) and sends it once writes work again. |
 | S3 access logs | The shared stack's **Outputs** → `AccessLogsBucket` (when the stack creates the bucket) | No | Every request to the telemetry bucket, including which admin read which prompts or recordings. |
 | CloudTrail | Your account or organization trail | No | AWS API calls by identity. |
@@ -391,7 +406,20 @@ Telemetry objects are gzipped OTLP JSON, partitioned `year=/month=/day=/hour=`, 
 a minute. Only the principals in `AdminPrincipalArnPatterns` can read the bucket the kit creates. When the
 stack creates the bucket, the bucket and the live session recordings in CloudWatch Logs both use the kit's KMS key.
 
-## Security model
+#### What each layer can miss
+
+- **Claude Code telemetry** comes from the box. With root, a user can change Claude Code's settings or call
+  Bedrock with another client while the collector keeps running, so neither telemetry alarm fires.
+- **Bedrock invocation logging** is the server-side record of every model call and the caller's identity,
+  from any client. It doesn't show what users type or run in the terminal themselves.
+- **Session recordings** cover Session Manager sessions only, and show what the terminal displays, not what
+  runs in the background.
+- **VPC flow logs** show IP addresses and ports, not domain names or content.
+
+To catch telemetry that was turned off, compare Bedrock invocation logs with each box's Claude Code
+telemetry (see [Hardening for production](docs/hardening-for-production.md#detection-and-response)).
+
+### Security model
 
 - **Isolated:** no inbound access (boxes share one security group with no inbound rules, so they can't
   reach each other either), Session Manager only, IMDSv2, encrypted disk; each box's role can write only its
@@ -404,17 +432,17 @@ stack creates the bucket, the bucket and the live session recordings in CloudWat
   only to the kit's S3 bucket, readable only by `AdminPrincipalArnPatterns`. The kit sends it to no external
   collector or service.
 - **Root on the box:** users can change anything on their own box, including telemetry. Detection, not
-  prevention, covers that (see above).
+  prevention, covers that, and only partly (see [What each layer can miss](#what-each-layer-can-miss)).
 - **Optional organization guardrails:** `policies/` has two SCPs and an RCP that lock the account down
   further (below).
 
-### Hardening for production
+#### Hardening for production
 
 Before you use this sample in production, see [Hardening for production](docs/hardening-for-production.md):
 egress filtering, endpoint and model restrictions, an off-account copy of the audit data, detection and
 response, and a golden image.
 
-## Optional: organization guardrails (SCPs and RCP)
+### Optional: organization guardrails (SCPs and RCP)
 
 Apply these from your AWS Organizations **management account** after the shared stack exists. Test on a
 non-production account first: SCPs apply to every principal in the account except the exempted admins.
@@ -443,7 +471,11 @@ stack, validates each policy with IAM Access Analyzer, and prints the commands t
 Effects to expect once attached: only admins can deploy or delete stacks; Bedrock calls from outside the
 VPC endpoint (for example Claude Code on a user's laptop, using the same identity) are denied.
 
-## Costs
+## Operations
+
+Running the sample: costs, updates, clean up and troubleshooting.
+
+### Costs
 
 Approximate, us-west-2, before Bedrock usage (which is usually the largest cost):
 
@@ -457,15 +489,15 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 | VPC flow logs (shared) | ~$0.50/GB ingested into CloudWatch Logs |
 | S3, CloudWatch Logs, alarms | usually a few dollars |
 
-## Updating
+### Updating
 
 - **Update the kit:** re-upload changed files to the same S3 location. New boxes use them. To refresh a
   running box's helper: `sudo aws s3 cp s3://<bucket>/claude-scan-kit/scripts/scan-harness.sh /usr/local/bin/`.
 - **Check a box's kit version:** it's in the login banner and in `/etc/claude-scan/kit-version` on the box
   (`dev` when the files were uploaded from a git clone instead of a downloaded zip).
 - **Add a toolchain or the harness to a running box** without rebuilding it: on the box, run
-  `sudo claude-scan-bootstrap --only toolchain-rust` (or `toolchain-java`, `toolchain-node`, ..., `harness`,
-  `sandbox`). It reruns that setup module.
+  `sudo claude-scan-bootstrap --only toolchain-rust` (or `toolchain-java`, `toolchain-node`, ..., `harness`).
+  It reruns that setup module.
 - **Change sign-in or model settings** (shared stack): new boxes use them. On a running box, run
   `sudo claude-scan-bootstrap --only aws-profile managed-settings banner` to pick them up without a rebuild.
 - **Upgrading boxes from a kit without shared sign-in settings:** update the shared stack first (fill in
@@ -477,7 +509,7 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 - The shared stack's exported values can't change while box stacks use them. To move boxes to a different VPC
   or bucket, delete the boxes first.
 
-## Clean up
+### Clean up
 
 - **Remove a user:** delete their `claude-scan-box-<owner>` stack, and remove their permission set assignment
   or group membership. Their telemetry and recordings stay in the bucket.
@@ -492,7 +524,7 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
   4. To re-create the shared stack under the same name and keep using the recordings log group, set
      `ExistingSessionLogGroupName` instead of deleting it.
 
-## Troubleshooting
+### Troubleshooting
 
 Start with the doctor commands; they run the checks below and say what to fix:
 
@@ -506,7 +538,7 @@ Start with the doctor commands; they run the checks below and say what to fix:
 |---|---|
 | Shared stack: nested stack fails with S3 access denied | The kit bucket/prefix is wrong, in a different region, or you can't read it. Check the `infra/` URLs exist. |
 | Shared stack: `SessionManagerPreferences` already exists | Session Manager preferences were saved before in this region. Set `ConfigureSessionManager = No`, or remove them and retry. |
-| Shared stack: `BedrockInvocationLogging` fails | With your own bucket, add the bucket and key policy statements in [Using your own bucket](#using-your-own-bucket). |
+| Shared stack: `BedrockInvocationLogging` fails | `already configured in this account and Region`: keep that logging and set `ConfigureBedrockLogging = No`. Otherwise, with your own bucket, add the bucket and key policy statements in [Using your own bucket](#using-your-own-bucket). |
 | Box stack: `Received FAILURE signal with UniqueId i-...` | A setup step on the box failed. CloudFormation can't show which, so the box records it in two places that survive the rollback: **CloudWatch Logs** → log group `/claude-scan/<shared-stack>/heartbeat` → the newest `bootstrap-failure-<time>-<instance-id>` stream, and the instance's **system log** (EC2 console → the terminated instance → Actions → Monitor and troubleshoot → Get system log; search for `FAILED`). The first line names the setup module, line and command, e.g. `module toolchain-go: exit 1 at toolchain-go.sh line 3: dnf install -y golang`, followed by the last 200 lines of setup output. In the system log, `=== claude-scan module <name>: start / ok / FAILED` lines show how far setup got. Common causes: no outbound internet from the subnet, a wrong kit bucket or prefix, `scripts/modules/` not uploaded, or a misspelled `ExtraPackages` name. |
 | Box stack fails with `preflight: N check(s) failed - ...` | Before installing anything, the box checks that it can reach and use what setup needs: the Amazon Linux package repositories, the telemetry bucket (write, and its encryption setting if Session Manager recording is on), CloudWatch Logs, the Session Manager, Bedrock and CloudFormation endpoints, and the internet hosts its modules download from. The message lists each failed check with what to fix, for example `HTTP 403 from the Amazon Linux repositories - the VPC's S3 gateway endpoint policy must allow s3:GetObject on arn:aws:s3:::al2023-repos-<region>-de612dc2/*`, or `no connection - ... their security group must allow HTTPS (443) from <subnet CIDR>`. The full PASS/FAIL list is in the same `bootstrap-failure-...` stream. |
 | Box stack fails with `module verify: the SSM agent didn't connect to Session Manager within 3 minutes` | The preflight reached the Session Manager endpoints, but the agent couldn't register or open its connection, so nobody could have connected. Usually an SCP, or an `ssm`/`ssmmessages`/`ec2messages` VPC endpoint policy, denies the box role. The message ends with the agent's last error. |
@@ -527,9 +559,28 @@ Start with the doctor commands; they run the checks below and say what to fix:
 
 With `InstallHarness = true`, each box clones Anthropic's open source
 [defending-code reference harness](https://github.com/anthropics/defending-code-reference-harness) (Apache-2.0)
-into the `claude` user's home directory at first boot. See its README for what it does and how to use it. Its
-README also notes that it isn't maintained upstream. The kit doesn't depend on it, so you can use any other
-harness instead.
+into the `claude` user's home directory at first boot, at the commit this kit was tested with. See its README
+for what it does and how to use it. Its README also notes that it isn't maintained upstream. The kit doesn't
+depend on it, so you can use any other harness instead.
+
+**Headless scans** (`scan-harness.sh scan <git-url|dir>`) run without anyone approving each step, and the
+repository under scan can steer the agent. So each scan runs on a fresh copy of the repository and the
+harness, as a separate `claude-scanner` user:
+
+- No `sudo`, and no access to your home directory or your AWS sign-in.
+- Only a short-term Bedrock API key, minted from your sign-in when the scan starts.
+- Firewall rules that allow only the VPC's endpoints: no internet and no instance metadata. Headless scans
+  therefore need the `bedrock-runtime` and `bedrock` interface endpoints (`InterfaceEndpoints`).
+
+Results go to `~/scan-results/<host>/<org>/<repo>/<time>/`, with `SCAN-INFO.json` (the repository, commit,
+harness commit, model and status). A scan fails, instead of reporting old results, when a step doesn't
+produce a complete report. See [Using scan-harness.sh](docs/scan-harness.md) for the commands, results and
+troubleshooting.
+
+The harness's autonomous pipeline, which builds and runs the code under test, needs Docker:
+`scan-harness.sh sandbox` installs it and sets up the harness's own sandbox. In interactive use (`claude` in
+the harness directory), Claude Code runs as you, with your permissions and sign-in, so review what it asks
+to run.
 
 ## Third-party software
 
@@ -544,9 +595,6 @@ license or terms, which you accept by deploying:
 | TypeScript, tsx, pnpm, yarn (node toolchain) | npm registry | Their respective open source licenses |
 | uv (python toolchain) | PyPI | Their respective open source licenses |
 | Toolchains and other packages | Amazon Linux 2023 repositories | Their respective licenses |
-
-Claude models on Amazon Bedrock are provided under Anthropic's terms, which you accept when you enable model
-access in the Bedrock console.
 
 ## Security
 

@@ -89,7 +89,6 @@ fi
 endpoint_fix="if the VPC has interface endpoints for these services, their security group must allow HTTPS (443) from $subnet_cidr; otherwise the subnet needs NAT"
 reach "ssm.$REGION.amazonaws.com" "Session Manager" "$endpoint_fix"
 reach "ssmmessages.$REGION.amazonaws.com" "Session Manager" "$endpoint_fix"
-reach "ec2messages.$REGION.amazonaws.com" "Session Manager" "$endpoint_fix"
 reach "bedrock-runtime.$REGION.amazonaws.com" "Bedrock" "$endpoint_fix"
 reach "bedrock.$REGION.amazonaws.com" "Bedrock model lookups" "$endpoint_fix"
 reach "cloudformation.$REGION.amazonaws.com" "setup signal" "$endpoint_fix"

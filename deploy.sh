@@ -78,7 +78,10 @@ case "${1:-}" in
       for svc in ssm ssmmessages ec2messages; do
         sgs=$(aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$vpc" "Name=service-name,Values=com.amazonaws.${AWS_REGION:-$(aws configure get region)}.$svc" \
           --query 'VpcEndpoints[0].Groups[].GroupId' --output text)
-        if [[ -z $sgs || $sgs == None ]]; then echo "  $svc: no endpoint (traffic goes through NAT)"; continue; fi
+        if [[ -z $sgs || $sgs == None ]]; then
+          [[ $svc == ec2messages ]] || echo "  $svc: no endpoint (traffic goes through NAT)"   # SSM Agent 3.3.40+ doesn't use it
+          continue
+        fi
         # shellcheck disable=SC2086
         allowed=$(aws ec2 describe-security-groups --group-ids $sgs --query \
           'SecurityGroups[].IpPermissions[?ToPort==`443` || IpProtocol==`-1`][].[IpRanges[].CidrIp, UserIdGroupPairs[].GroupId][]' --output text | tr '\t\n' '  ')

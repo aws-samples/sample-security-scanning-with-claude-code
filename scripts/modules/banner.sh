@@ -15,8 +15,8 @@ cat <<'BANNER'
 
   Claude scan box - owner: $OWNER   (kit $KIT_VERSION)
 
-  NOTICE: everything you do here is recorded for audit - your terminal session, and all Claude Code
-  activity (prompts, responses, commands it runs, and file contents it reads).
+  NOTICE: your activity here is recorded for audit - your terminal sessions and Claude Code activity
+  (prompts, responses, commands it runs, and file contents it reads).
 
   1. Sign in:   $signin
   2. Start:     tmux             (keeps long jobs alive if your connection drops; mouse wheel scrolls back)
