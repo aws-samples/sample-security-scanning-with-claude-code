@@ -80,6 +80,7 @@ sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
 | `policies/` | The `ClaudeScanUser` Identity Center permission set, and optional AWS Organizations guardrails (SCPs and an RCP). |
 | `deploy.sh` | Optional command-line shortcut for the console steps below. |
 | `docs/hardening-for-production.md` | What to add before you use the sample in production. |
+| `docs/scan-harness.md` | How to use `scan-harness.sh`: headless scans, results, the autonomous pipeline, troubleshooting. |
 
 ## Prerequisites
 
@@ -167,7 +168,8 @@ tmux                                  # keeps long jobs alive if the connection 
 claude                                # Claude Code, ready to use
 ```
 
-Clone the code you want to review, or use the harness the box set up (see [About the harness](#about-the-harness)).
+Clone the code you want to review, or use the harness the box set up (see [About the harness](#about-the-harness)
+and [Using scan-harness.sh](docs/scan-harness.md)).
 
 **Scrolling in tmux:** the mouse wheel scrolls back through earlier output (the box sets `mouse on` and a
 50,000-line history). On Windows, use Windows Terminal rather than the legacy `cmd.exe` window, which
@@ -572,7 +574,8 @@ harness, as a separate `claude-scanner` user:
 
 Results go to `~/scan-results/<host>/<org>/<repo>/<time>/`, with `SCAN-INFO.json` (the repository, commit,
 harness commit, model and status). A scan fails, instead of reporting old results, when a step doesn't
-produce a complete report.
+produce a complete report. See [Using scan-harness.sh](docs/scan-harness.md) for the commands, results and
+troubleshooting.
 
 The harness's autonomous pipeline, which builds and runs the code under test, needs Docker:
 `scan-harness.sh sandbox` installs it and sets up the harness's own sandbox. In interactive use (`claude` in
