@@ -590,9 +590,6 @@ license or terms, which you accept by deploying:
 | uv (python toolchain) | PyPI | Their respective open source licenses |
 | Toolchains and other packages | Amazon Linux 2023 repositories | Their respective licenses |
 
-Claude models on Amazon Bedrock are provided under Anthropic's terms, which you accept when you enable model
-access in the Bedrock console.
-
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
