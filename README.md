@@ -297,7 +297,6 @@ The stack can't change an existing bucket's policies, so add these yourself:
 | `VolumeSize` | 100 GiB | |
 | `Toolchains` | all seven | Comma-separated, no spaces: `java` (Corretto 21, Maven), `node` (Node.js 22, TypeScript, tsx, pnpm, yarn), `python` (3.12, pip, uv), `go`, `rust` (with Cargo), `cpp` (GCC, Clang, Make, CMake, GDB), `dotnet` (.NET 8 SDK). `none` installs none. |
 | `ExtraPackages` | blank | More Amazon Linux packages, space-separated. |
-| `EnableSandbox` | false | Installs Docker, for harnesses that run the code under test in containers. |
 | `InstallHarness` | true | Clones Anthropic's open source defending-code reference harness. Claude Code and telemetry are always installed. |
 | `AutoStopIdleHours` | 4 | Stops the box after this many hours under 2% CPU. 0 = never. Users can start their own box again from the EC2 console (Instance state → Start). |
 
@@ -495,8 +494,8 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 - **Check a box's kit version:** it's in the login banner and in `/etc/claude-scan/kit-version` on the box
   (`dev` when the files were uploaded from a git clone instead of a downloaded zip).
 - **Add a toolchain or the harness to a running box** without rebuilding it: on the box, run
-  `sudo claude-scan-bootstrap --only toolchain-rust` (or `toolchain-java`, `toolchain-node`, ..., `harness`,
-  `sandbox`). It reruns that setup module.
+  `sudo claude-scan-bootstrap --only toolchain-rust` (or `toolchain-java`, `toolchain-node`, ..., `harness`).
+  It reruns that setup module.
 - **Change sign-in or model settings** (shared stack): new boxes use them. On a running box, run
   `sudo claude-scan-bootstrap --only aws-profile managed-settings banner` to pick them up without a rebuild.
 - **Upgrading boxes from a kit without shared sign-in settings:** update the shared stack first (fill in
@@ -573,8 +572,12 @@ harness, as a separate `claude-scanner` user:
 
 Results go to `~/scan-results/<host>/<org>/<repo>/<time>/`, with `SCAN-INFO.json` (the repository, commit,
 harness commit, model and status). A scan fails, instead of reporting old results, when a step doesn't
-produce a complete report. In interactive use (`claude` in the harness directory), Claude Code runs as you,
-with your permissions and sign-in, so review what it asks to run.
+produce a complete report.
+
+The harness's autonomous pipeline, which builds and runs the code under test, needs Docker:
+`scan-harness.sh sandbox` installs it and sets up the harness's own sandbox. In interactive use (`claude` in
+the harness directory), Claude Code runs as you, with your permissions and sign-in, so review what it asks
+to run.
 
 ## Third-party software
 

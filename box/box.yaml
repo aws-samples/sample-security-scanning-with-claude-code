@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Security Scanning with Claude Code on AWS - one sandboxed Claude Code box for one user (deploy once per user, after shared.yaml).
+  Security Scanning with Claude Code on AWS - one isolated Claude Code box for one user (deploy once per user, after shared.yaml).
   Amazon Linux 2023, SSM access only, Claude Code on Bedrock, the defending-code harness, mandatory telemetry.
   Sign-in, models, permissions and the security group come from the shared stack.
 
@@ -14,7 +14,7 @@ Metadata:
       - Label: { default: "User" }
         Parameters: [Owner]
       - Label: { default: "Box" }
-        Parameters: [InstanceType, VolumeSize, Toolchains, ExtraPackages, EnableSandbox, InstallHarness, AutoStopIdleHours, LatestAmiId]
+        Parameters: [InstanceType, VolumeSize, Toolchains, ExtraPackages, InstallHarness, AutoStopIdleHours, LatestAmiId]
     ParameterLabels:
       SharedStackName: { default: "Name of the shared.yaml stack" }
       Owner: { default: "Owner (short name, e.g. jdoe)" }
@@ -22,7 +22,6 @@ Metadata:
       VolumeSize: { default: "Disk size (GiB)" }
       Toolchains: { default: "Toolchains to install (comma-separated, or none)" }
       ExtraPackages: { default: "Extra dnf packages (space-separated)" }
-      EnableSandbox: { default: "Install Docker for the harness sandbox?" }
       InstallHarness: { default: "Install the defending-code harness (scan-harness.sh)?" }
       AutoStopIdleHours: { default: "Stop after this many idle hours (0 = never)" }
 
@@ -56,10 +55,6 @@ Parameters:
     Type: String
     Default: ""
     AllowedPattern: ^[A-Za-z0-9._+ -]*$
-  EnableSandbox:
-    Type: String
-    AllowedValues: ["true", "false"]
-    Default: "false"
   InstallHarness:
     Type: String
     AllowedValues: ["true", "false"]
@@ -176,7 +171,6 @@ Resources:
               OWNER='${Owner}'
               TOOLCHAINS='${Toolchains}'
               EXTRA_PACKAGES='${ExtraPackages}'
-              ENABLE_SANDBOX='${EnableSandbox}'
               INSTALL_HARNESS='${InstallHarness}'
               REGION='${AWS::Region}'
               TELEMETRY_BUCKET='${TelemetryBucket}'

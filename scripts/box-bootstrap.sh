@@ -15,7 +15,7 @@ source /etc/claude-scan/box.env
 MODULES=(
   corporate-ca preflight user base-packages telemetry
   toolchain-java toolchain-node toolchain-python toolchain-go toolchain-rust toolchain-cpp toolchain-dotnet
-  extra-packages sandbox claude-code aws-profile managed-settings harness doctor banner verify
+  extra-packages claude-code aws-profile managed-settings harness doctor banner verify
 )
 
 # Box stacks created before these settings existed: same result as before
@@ -41,7 +41,6 @@ selected() {   # $1 = module
     corporate-ca)   [[ -n ${CORPORATE_CA_KEY:-} && ${CORPORATE_CA_KEY:-} != none ]] ;;
     toolchain-*)    [[ ,$TOOLCHAINS, == *,${1#toolchain-},* ]] ;;
     extra-packages) [[ -n ${EXTRA_PACKAGES//[[:space:]]/} ]] ;;
-    sandbox)        [[ $ENABLE_SANDBOX == true ]] ;;
     harness)        [[ $INSTALL_HARNESS == true ]] ;;
     *)              true ;;
   esac
