@@ -13,6 +13,7 @@ Parameters:
   VpcCidr:
     Type: String
     Default: 10.42.0.0/16
+  # Inside VpcCidr: the public subnet holds the NAT gateway, the private subnet the boxes and endpoints
   PublicSubnetCidr:
     Type: String
     Default: 10.42.0.0/24
@@ -29,7 +30,7 @@ Parameters:
     Type: String
     Default: ""
     Description: Up to 4 comma-separated CIDR blocks of the existing VPC; the endpoints accept HTTPS from all of them
-  # Comma-separated: ssm (ssm, ssmmessages, ec2messages), bedrock-runtime, bedrock, logs, cloudformation; or none
+  # Comma-separated: ssm (ssm, ssmmessages), ec2messages, bedrock-runtime, bedrock, logs, cloudformation; or none
   Endpoints:
     Type: String
     Default: ssm,bedrock-runtime,bedrock,logs,cloudformation
@@ -41,11 +42,13 @@ Conditions:
   CreateVpc: !Equals [!Ref CreateVpc, "Yes"]
   # ",x," in ",<Endpoints>," - splitting on it and joining back changes the string only if it's there
   Ssm: !Not [!Equals [!Join ["", !Split [",ssm,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
+  # SSM Agent 3.3.40 and later uses ssmmessages instead; newer Regions don't offer ec2messages
+  Ec2Messages: !Not [!Equals [!Join ["", !Split [",ec2messages,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
   BedrockRuntime: !Not [!Equals [!Join ["", !Split [",bedrock-runtime,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
   Bedrock: !Not [!Equals [!Join ["", !Split [",bedrock,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
   Logs: !Not [!Equals [!Join ["", !Split [",logs,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
   CloudFormation: !Not [!Equals [!Join ["", !Split [",cloudformation,", !Join ["", [",", !Ref Endpoints, ","]]]], !Join ["", [",", !Ref Endpoints, ","]]]]
-  AnyEndpoint: !Or [!Condition Ssm, !Condition BedrockRuntime, !Condition Bedrock, !Condition Logs, !Condition CloudFormation]
+  AnyEndpoint: !Or [!Condition Ssm, !Condition Ec2Messages, !Condition BedrockRuntime, !Condition Bedrock, !Condition Logs, !Condition CloudFormation]
   # 2nd-4th CIDR of an existing VPC (",,," keeps Select in range when there are fewer)
   ExistingCidr2: !And
     - !Condition AnyEndpoint
@@ -367,7 +370,7 @@ Resources:
         - !Ref AWS::NoValue
   Ec2MessagesEndpoint:
     Type: AWS::EC2::VPCEndpoint
-    Condition: Ssm
+    Condition: Ec2Messages
     Properties:
       VpcId: !If [CreateVpc, !Ref Vpc, !Ref ExistingVpcId]
       ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages

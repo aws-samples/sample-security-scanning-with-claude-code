@@ -28,6 +28,10 @@ isolation:
   egress proxy with a per-engagement allowlist. Users and agents have `sudo` on the box, so prompts and
   settings on the box don't count as a control.
 
+The kit's headless scans run as a separate user without `sudo`, your credentials or internet access (see
+[About the harness](../README.md#about-the-harness)). That limits what a misled agent can reach, but it
+still shares the box and its VPC with the user, so it doesn't replace the isolation above.
+
 ## Account and organization
 
 - **A dedicated AWS account** for the boxes. Session Manager preferences and Bedrock invocation logging apply to
@@ -172,6 +176,11 @@ The kit alarms when a box's telemetry stops or isn't delivered. Add account-leve
     - `DisableKey` and `ScheduleKeyDeletion` on the kit's key.
     - `DeleteModelInvocationLoggingConfiguration`.
     - Changes to the Session Manager preferences document.
+- **Compare model calls with telemetry.** Bedrock invocation logs (`bedrock-logs/` in the telemetry bucket)
+  record every model call with the caller's identity, and a box user can't turn them off. If an identity
+  that uses a box has model calls but its box sent no Claude Code telemetry (`claude-code/<owner>/logs/`)
+  for the same period, telemetry was turned off or bypassed. Check this regularly, for example with
+  Amazon Athena queries over both prefixes.
 - **Bedrock usage alarms** on the `AWS/Bedrock` `InputTokenCount` and `OutputTokenCount` metrics, plus an
   AWS Budgets alert on Bedrock cost. They catch runaway agent loops and stolen credentials.
 - **A quarantine runbook,** written and practiced before you need it:
@@ -191,11 +200,11 @@ The kit alarms when a box's telemetry stops or isn't delivered. Add account-leve
 
 When a box is set up, it downloads and installs software:
 
-- Claude Code (latest version).
+- Claude Code (the stable release channel).
 - The OpenTelemetry Collector (a pinned version, from GitHub).
 - Amazon Linux packages.
-- npm and PyPI tools.
-- The harness (from its default branch).
+- npm and PyPI tools (pinned versions).
+- The harness (pinned to the commit the kit was tested with).
 
 A compromised or changed upstream reaches every new box.
 
@@ -209,7 +218,8 @@ A compromised or changed upstream reaches every new box.
   `scripts/modules/claude-code.sh` and `scripts/modules/telemetry.sh`. Also turn off Claude Code's
   auto-updates (`DISABLE_AUTOUPDATER=1` in `scripts/modules/managed-settings.sh`), so boxes keep the
   version you reviewed.
-- **Pin your harness** to a reviewed commit or release, and keep a copy in a repository you control.
+- **Review harness updates:** the kit pins the harness (`HARNESS_REF` in `scripts/scan-harness.sh`). Review a
+  new commit before you move to it, and keep a copy in a repository you control.
 - **Use package mirrors,** such as AWS CodeArtifact for npm and PyPI, instead of the public registries.
   With a golden image and mirrors, boxes need no internet egress.
 
