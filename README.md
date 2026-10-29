@@ -175,7 +175,12 @@ doesn't pass the mouse through. Without a mouse, press `Ctrl-b` then `[`, scroll
 press `q` to exit. To select text with your own terminal instead of tmux, hold Shift (Option in iTerm2)
 while dragging.
 
-## Sign-in modes
+## Configuration
+
+Details for customizing the shared and box stacks. The defaults work for most deployments; the setup steps
+link here where a choice matters.
+
+### Sign-in modes
 
 | Mode | Identity Bedrock sees | Credentials on the box | Notes |
 |---|---|---|---|
@@ -191,7 +196,7 @@ stack's `RequireMfa` option additionally requires `aws:MultiFactorAuthPresent` o
 Session Manager permissions. Leave it off until you've confirmed your users' sessions carry that flag, or
 they'll be locked out.
 
-## Shared parameters
+### Shared parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -217,7 +222,7 @@ they'll be locked out.
 | `LogRetentionDays` | 365 | Live session recordings in CloudWatch Logs. |
 | `ExistingSessionLogGroupName` | blank | Only when re-creating a deleted shared stack under the same name: enter the kept `/claude-scan/<stack>/sessions` group to keep using it. |
 
-### Account-wide settings
+#### Account-wide settings
 
 Two settings apply to the **whole account in that region**, not just the boxes. That's why a dedicated
 account is recommended:
@@ -231,7 +236,7 @@ account is recommended:
   region (Bedrock console → Settings); set this to No to keep yours. Deleting the stack turns logging off only
   if the stack set it and it still points to the stack's bucket.
 
-### Using your own VPC
+#### Using your own VPC
 
 The subnet must be private with outbound internet access (NAT), and the VPC must have DNS hostnames and
 DNS support enabled. Boxes reach GitHub, package repositories and Claude Code updates through the internet.
@@ -260,7 +265,7 @@ interface endpoints for your own VPC:
 - If the VPC already has a `bedrock-runtime` endpoint, enter its ID as `ExistingBedrockVpceId` (used by
   the optional agent-perimeter SCP).
 
-### Using your own bucket
+#### Using your own bucket
 
 The stack can't change an existing bucket's policies, so add these yourself:
 
@@ -282,7 +287,7 @@ The stack can't change an existing bucket's policies, so add these yourself:
 3. **Restrict reads to administrators**: the data includes prompts and source code.
 4. **Default encryption must be on** (all new buckets have it). Session recordings require it.
 
-## Box parameters
+### Box parameters
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -296,7 +301,7 @@ The stack can't change an existing bucket's policies, so add these yourself:
 | `InstallHarness` | true | Clones Anthropic's open source defending-code reference harness. Claude Code and telemetry are always installed. |
 | `AutoStopIdleHours` | 4 | Stops the box after this many hours under 2% CPU. 0 = never. Users can start their own box again from the EC2 console (Instance state → Start). |
 
-### Adding Claude Mythos (or another model Claude Code doesn't list)
+#### Adding Claude Mythos (or another model Claude Code doesn't list)
 
 Claude Code ships with a fixed list of models. Claude Mythos 5.1 isn't on it, and access to it is gated by
 Anthropic per account, so the kit adds it only when you set these **shared stack** parameters. Every box in the
@@ -322,7 +327,7 @@ Users then pick **Mythos 5.1** in `/model`. To start every session on it, also s
 - **No policy changes needed:** the ID matches the kit's Claude-only IAM and SCP patterns, and the first call
   subscribes to its Marketplace listing through Bedrock, which the kit's policies allow.
 
-## Identity Center permission set
+### Identity Center permission set
 
 For `AuthMode = IdentityCenter`, don't sign users in with an administrator permission set. While a
 session is active, anything running on the box can use it, including code in a repo being scanned. Use
@@ -362,7 +367,7 @@ The shared stack's `SsoRoleName` defaults to `ClaudeScanUser`.
 3. Settings → Attributes for access control → add key `Owner` with your chosen attribute.
 4. AWS accounts → the scanning account → Assign users or groups → `ClaudeScanUser`.
 
-## IAM users
+### IAM users
 
 With `AuthMode = IamUser`, the shared stack creates an IAM group, `<shared stack>-users-<region>` (its
 **Outputs** → `UserGroup`), with the same permissions as the `ClaudeScanUser` permission set plus `aws login`.
@@ -375,7 +380,11 @@ For each user:
 on the box. A user without the tag can't connect to any box. Users sign in on the box with `aws login`
 (no access keys).
 
-## Audit and detection
+## Security and audit
+
+What the sample records, how boxes are isolated, and optional organization guardrails.
+
+### Audit and detection
 
 Users have full `sudo` on their box, so recording can't be enforced from inside it. Instead, several
 layers record activity. The ones outside the box can't be switched off from it, but no single layer sees
@@ -396,7 +405,7 @@ Telemetry objects are gzipped OTLP JSON, partitioned `year=/month=/day=/hour=`, 
 a minute. Only the principals in `AdminPrincipalArnPatterns` can read the bucket the kit creates. When the
 stack creates the bucket, the bucket and the live session recordings in CloudWatch Logs both use the kit's KMS key.
 
-### What each layer can miss
+#### What each layer can miss
 
 - **Claude Code telemetry** comes from the box. With root, a user can change Claude Code's settings or call
   Bedrock with another client while the collector keeps running, so neither telemetry alarm fires.
@@ -409,7 +418,7 @@ stack creates the bucket, the bucket and the live session recordings in CloudWat
 To catch telemetry that was turned off, compare Bedrock invocation logs with each box's Claude Code
 telemetry (see [Hardening for production](docs/hardening-for-production.md#detection-and-response)).
 
-## Security model
+### Security model
 
 - **Isolated:** no inbound access (boxes share one security group with no inbound rules, so they can't
   reach each other either), Session Manager only, IMDSv2, encrypted disk; each box's role can write only its
@@ -426,13 +435,13 @@ telemetry (see [Hardening for production](docs/hardening-for-production.md#detec
 - **Optional organization guardrails:** `policies/` has two SCPs and an RCP that lock the account down
   further (below).
 
-### Hardening for production
+#### Hardening for production
 
 Before you use this sample in production, see [Hardening for production](docs/hardening-for-production.md):
 egress filtering, endpoint and model restrictions, an off-account copy of the audit data, detection and
 response, and a golden image.
 
-## Optional: organization guardrails (SCPs and RCP)
+### Optional: organization guardrails (SCPs and RCP)
 
 Apply these from your AWS Organizations **management account** after the shared stack exists. Test on a
 non-production account first: SCPs apply to every principal in the account except the exempted admins.
@@ -461,7 +470,11 @@ stack, validates each policy with IAM Access Analyzer, and prints the commands t
 Effects to expect once attached: only admins can deploy or delete stacks; Bedrock calls from outside the
 VPC endpoint (for example Claude Code on a user's laptop, using the same identity) are denied.
 
-## Costs
+## Operations
+
+Running the sample: costs, updates, clean up and troubleshooting.
+
+### Costs
 
 Approximate, us-west-2, before Bedrock usage (which is usually the largest cost):
 
@@ -475,7 +488,7 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 | VPC flow logs (shared) | ~$0.50/GB ingested into CloudWatch Logs |
 | S3, CloudWatch Logs, alarms | usually a few dollars |
 
-## Updating
+### Updating
 
 - **Update the kit:** re-upload changed files to the same S3 location. New boxes use them. To refresh a
   running box's helper: `sudo aws s3 cp s3://<bucket>/claude-scan-kit/scripts/scan-harness.sh /usr/local/bin/`.
@@ -495,7 +508,7 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 - The shared stack's exported values can't change while box stacks use them. To move boxes to a different VPC
   or bucket, delete the boxes first.
 
-## Clean up
+### Clean up
 
 - **Remove a user:** delete their `claude-scan-box-<owner>` stack, and remove their permission set assignment
   or group membership. Their telemetry and recordings stay in the bucket.
@@ -510,7 +523,7 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
   4. To re-create the shared stack under the same name and keep using the recordings log group, set
      `ExistingSessionLogGroupName` instead of deleting it.
 
-## Troubleshooting
+### Troubleshooting
 
 Start with the doctor commands; they run the checks below and say what to fix:
 
