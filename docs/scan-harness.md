@@ -18,7 +18,10 @@ this page covers the kit's helper only.
 
 Run the helper on the box, as the `claude` user (the user every Session Manager session opens as):
 
-1. **Sign in** (login banner, step 1). Scans call Bedrock with a key minted from your sign-in.
+1. **Sign in to AWS** (login banner, step 1): `aws sso login --profile claude --use-device-code` with
+   Identity Center, or `aws login --remote --profile claude-login` with IAM users. Not needed with
+   `AuthMode = InstanceRole`. Scans call Bedrock with a key minted from this sign-in. Claude Code itself has
+   no separate login.
 2. **Start `tmux`**, so a scan keeps running if your connection drops.
 3. **Check the endpoints:** headless scans have no internet access, so the VPC needs the `bedrock-runtime`
    and `bedrock` interface endpoints. A VPC the kit builds has them; for your own VPC, see the shared stack's
@@ -125,7 +128,7 @@ Set these as environment variables before the command, for example `MODEL=<id> s
 | `the claude-scanner user is missing` or `Bedrock key tool missing` | Run `sudo claude-scan-bootstrap --only harness`. |
 | `the claude-scanner firewall rules aren't loaded` | Run `sudo systemctl restart claude-scan-scanner-firewall`. |
 | `bedrock-runtime... doesn't resolve to a VPC endpoint` | The VPC has no `bedrock-runtime` endpoint, so isolated scans can't reach Bedrock. Add the `bedrock-runtime` and `bedrock` endpoints (shared stack `InterfaceEndpoints`). |
-| `could not mint a Bedrock API key` or `no AWS credentials` | Sign in (login banner, step 1), then rerun the scan. |
+| `could not mint a Bedrock API key` or `no AWS credentials` | Sign in to AWS (login banner, step 1), then rerun the scan. |
 | `<step>: <file> wasn't written` or `isn't complete` | The step ended without a complete report. Read `<step>.log` in the results folder, then rerun the scan. |
 | `git clone failed` | Check the URL, and for a private repository, your Git credentials on the box. |
 | `Bedrock key expires within 30 min` (pipeline) | Sign in again, then run `scan-harness.sh token`. |
