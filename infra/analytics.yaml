@@ -1,0 +1,598 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Security Scanning with Claude Code on AWS - dashboards over the telemetry in S3: Athena tables and views, an
+  owner reconciler, and an optional Amazon Managed Grafana workspace (nested in shared.yaml)
+
+Parameters:
+  SharedStackName:
+    Type: String
+  BucketName:
+    Type: String
+  KmsKeyArn:
+    Type: String
+    Default: none
+  AccessLogsBucketName:
+    Type: String
+    Default: none
+  CreateGrafanaWorkspace:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+
+Conditions:
+  HasKey: !Not [!Equals [!Ref KmsKeyArn, none]]
+  HasAccessLogs: !Not [!Equals [!Ref AccessLogsBucketName, none]]
+  CreateWorkspace: !Equals [!Ref CreateGrafanaWorkspace, "Yes"]
+
+Resources:
+  Database:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Join ["_", !Split ["-", !Ref SharedStackName]]
+        Description: Security Scanning with Claude Code on AWS - Claude Code telemetry in the telemetry bucket
+
+  # One gzipped OTLP JSON document per object, under claude-code/<owner>/<signal>/year=/month=/day=/hour=/.
+  # Partition projection: the owner list is kept current by the reconciler below; dt is the hour folder.
+  LogsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: otel_logs
+        Description: Claude Code events (prompts, responses, tool calls, API requests) as OTLP logs
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - { Name: owner, Type: string }
+          - { Name: dt, Type: string }
+        Parameters:
+          classification: json
+          projection.enabled: "true"
+          projection.owner.type: enum
+          projection.owner.values: "-"
+          projection.dt.type: date
+          projection.dt.format: "'year='yyyy'/month='MM'/day='dd'/hour='HH"
+          projection.dt.range: "year=2026/month=01/day=01/hour=00,NOW"
+          projection.dt.interval: "1"
+          projection.dt.interval.unit: HOURS
+          storage.location.template: !Sub "s3://${BucketName}/claude-code/${!owner}/logs/${!dt}/"
+        StorageDescriptor:
+          Location: !Sub s3://${BucketName}/claude-code/
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              ignore.malformed.json: "true"
+          Columns:
+            - Name: resourcelogs
+              Type: "array<struct<resource:struct<attributes:array<struct<key:string,value:struct<stringvalue:string,\
+                intvalue:string,doublevalue:double,boolvalue:boolean>>>>,\
+                scopelogs:array<struct<scope:struct<name:string,version:string>,\
+                logrecords:array<struct<timeunixnano:string,traceid:string,spanid:string,\
+                body:struct<stringvalue:string>,attributes:array<struct<key:string,value:struct<stringvalue:string,\
+                intvalue:string,doublevalue:double,boolvalue:boolean>>>>>>>>>"
+
+  MetricsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: otel_metrics
+        Description: Claude Code usage metrics (tokens, cost, sessions, active time, lines of code) as OTLP metrics
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - { Name: owner, Type: string }
+          - { Name: dt, Type: string }
+        Parameters:
+          classification: json
+          projection.enabled: "true"
+          projection.owner.type: enum
+          projection.owner.values: "-"
+          projection.dt.type: date
+          projection.dt.format: "'year='yyyy'/month='MM'/day='dd'/hour='HH"
+          projection.dt.range: "year=2026/month=01/day=01/hour=00,NOW"
+          projection.dt.interval: "1"
+          projection.dt.interval.unit: HOURS
+          storage.location.template: !Sub "s3://${BucketName}/claude-code/${!owner}/metrics/${!dt}/"
+        StorageDescriptor:
+          Location: !Sub s3://${BucketName}/claude-code/
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              ignore.malformed.json: "true"
+          Columns:
+            - Name: resourcemetrics
+              Type: "array<struct<resource:struct<attributes:array<struct<key:string,value:struct<stringvalue:string,\
+                intvalue:string,doublevalue:double,boolvalue:boolean>>>>,\
+                scopemetrics:array<struct<metrics:array<struct<name:string,unit:string,\
+                sum:struct<datapoints:array<struct<timeunixnano:string,asdouble:double,asint:string,\
+                attributes:array<struct<key:string,value:struct<stringvalue:string,intvalue:string,\
+                doublevalue:double,boolvalue:boolean>>>>>>>>>>>>"
+
+  TracesTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: otel_traces
+        Description: Claude Code traces (one per prompt, with its model requests and tool calls) as OTLP spans
+        TableType: EXTERNAL_TABLE
+        PartitionKeys:
+          - { Name: owner, Type: string }
+          - { Name: dt, Type: string }
+        Parameters:
+          classification: json
+          projection.enabled: "true"
+          projection.owner.type: enum
+          projection.owner.values: "-"
+          projection.dt.type: date
+          projection.dt.format: "'year='yyyy'/month='MM'/day='dd'/hour='HH"
+          projection.dt.range: "year=2026/month=01/day=01/hour=00,NOW"
+          projection.dt.interval: "1"
+          projection.dt.interval.unit: HOURS
+          storage.location.template: !Sub "s3://${BucketName}/claude-code/${!owner}/traces/${!dt}/"
+        StorageDescriptor:
+          Location: !Sub s3://${BucketName}/claude-code/
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              ignore.malformed.json: "true"
+          Columns:
+            - Name: resourcespans
+              Type: "array<struct<resource:struct<attributes:array<struct<key:string,value:struct<stringvalue:string,\
+                intvalue:string,doublevalue:double,boolvalue:boolean>>>>,\
+                scopespans:array<struct<scope:struct<name:string,version:string>,spans:array<struct<traceid:string,\
+                spanid:string,parentspanid:string,name:string,kind:int,starttimeunixnano:string,\
+                endtimeunixnano:string,status:struct<code:int,message:string>,attributes:array<struct<key:string,\
+                value:struct<stringvalue:string,intvalue:string,doublevalue:double,boolvalue:boolean>>>>>>>>>"
+
+  # Query results contain prompt text: encrypted like the telemetry, kept for a week
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_21
+            comment: Athena query results expire after 7 days; versioning would keep deleted results
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: Access logging is on when the shared stack has an access-log bucket (it does when it creates the telemetry bucket)
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - !If
+            - HasKey
+            - ServerSideEncryptionByDefault: { SSEAlgorithm: aws:kms, KMSMasterKeyID: !Ref KmsKeyArn }
+              BucketKeyEnabled: true
+            - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire
+            Status: Enabled
+            ExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      LoggingConfiguration: !If
+        - HasAccessLogs
+        - DestinationBucketName: !Ref AccessLogsBucketName
+          LogFilePrefix: athena-results/
+        - !Ref AWS::NoValue
+  ResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ResultsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ResultsBucket.Arn
+              - !Sub ${ResultsBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # The GrafanaDataSource tag is what Amazon Managed Grafana's Athena data source looks for
+  WorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Ref SharedStackName
+      Description: Security Scanning with Claude Code on AWS - telemetry dashboards and queries
+      RecursiveDeleteOption: true
+      Tags:
+        - Key: GrafanaDataSource
+          Value: "true"
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        # A runaway dashboard query stops at 10 GB scanned
+        BytesScannedCutoffPerQuery: 10737418240
+        EngineVersion:
+          SelectedEngineVersion: Athena engine version 3
+        ResultConfiguration:
+          OutputLocation: !Sub s3://${ResultsBucket}/
+          EncryptionConfiguration: !If
+            - HasKey
+            - { EncryptionOption: SSE_KMS, KmsKey: !Ref KmsKeyArn }
+            - { EncryptionOption: SSE_S3 }
+
+  # Read access to the telemetry and query results, for the Grafana workspace's role (or your own workspace's)
+  GrafanaAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: athena:ListWorkGroups, ListDataCatalogs and GetDataCatalog support only Resource "*"
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - Athena queries over the telemetry, for Grafana
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AthenaDiscovery
+            Effect: Allow
+            Action: [athena:ListWorkGroups, athena:ListDataCatalogs, athena:GetDataCatalog]
+            Resource: "*"
+          - Sid: AthenaQueries
+            Effect: Allow
+            Action:
+              - athena:GetWorkGroup
+              - athena:StartQueryExecution
+              - athena:StopQueryExecution
+              - athena:GetQueryExecution
+              - athena:GetQueryResults
+              - athena:ListDatabases
+              - athena:GetDatabase
+              - athena:ListTableMetadata
+              - athena:GetTableMetadata
+            Resource:
+              - !Sub arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${WorkGroup}
+              - !Sub arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:datacatalog/AwsDataCatalog
+          - Sid: GlueCatalog
+            Effect: Allow
+            Action: [glue:GetDatabase, glue:GetDatabases, glue:GetTable, glue:GetTables, glue:GetPartition, glue:GetPartitions]
+            Resource:
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${Database}
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${Database}/*
+          - Sid: Telemetry
+            Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}/claude-code/*
+          - Sid: TelemetryList
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}
+            Condition:
+              StringLike:
+                s3:prefix: claude-code/*
+          - Sid: TelemetryLocation
+            Effect: Allow
+            Action: s3:GetBucketLocation
+            Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}
+          - Sid: QueryResults
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:AbortMultipartUpload, s3:ListBucket, s3:GetBucketLocation]
+            Resource:
+              - !GetAtt ResultsBucket.Arn
+              - !Sub ${ResultsBucket.Arn}/*
+          - !If
+            - HasKey
+            - Sid: TelemetryKey
+              Effect: Allow
+              Action: [kms:Decrypt, kms:GenerateDataKey]
+              Resource: !Ref KmsKeyArn
+            - !Ref AWS::NoValue
+
+  # The name matches the claude-scan-platform-* exemption in the optional SCPs; the shared stack adds it to the
+  # principals the telemetry bucket policy lets read
+  GrafanaRole:
+    Type: AWS::IAM::Role
+    Condition: CreateWorkspace
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Fixed name matches the claude-scan-platform-* exemption in the optional SCPs and the telemetry bucket policy
+    Properties:
+      RoleName: !Sub claude-scan-platform-grafana-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: grafana.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns: [!Ref GrafanaAccessPolicy]
+
+  Workspace:
+    Type: AWS::Grafana::Workspace
+    Condition: CreateWorkspace
+    Properties:
+      Name: !Ref SharedStackName
+      Description: Security Scanning with Claude Code on AWS - telemetry dashboards
+      AccountAccessType: CURRENT_ACCOUNT
+      AuthenticationProviders: [AWS_SSO]
+      PermissionType: CUSTOMER_MANAGED
+      RoleArn: !GetAtt GrafanaRole.Arn
+      DataSources: [ATHENA]
+      GrafanaVersion: "12.4"
+      PluginAdminEnabled: true
+
+  # Keeps the tables' owner list current (every 15 minutes, and at deploy) and creates the views
+  AnalyticsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - owner reconciler and Athena views
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Only the top level of claude-code/: the owner folder names, not the telemetry
+          - Sid: ListOwners
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}
+            Condition:
+              StringEquals:
+                s3:prefix: claude-code/
+                s3:delimiter: /
+          - Sid: Tables
+            Effect: Allow
+            Action: [glue:GetDatabase, glue:GetTable, glue:GetTables, glue:UpdateTable, glue:CreateTable, glue:DeleteTable]
+            Resource:
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${Database}
+              - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${Database}/*
+          - Sid: Views
+            Effect: Allow
+            Action: [athena:StartQueryExecution, athena:GetQueryExecution]
+            Resource: !Sub arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/${WorkGroup}
+          - Sid: QueryResults
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket, s3:GetBucketLocation, s3:AbortMultipartUpload]
+            Resource:
+              - !GetAtt ResultsBucket.Arn
+              - !Sub ${ResultsBucket.Arn}/*
+          - !If
+            - HasKey
+            - Sid: ResultsKey
+              Effect: Allow
+              Action: [kms:Decrypt, kms:GenerateDataKey]
+              Resource: !Ref KmsKeyArn
+            - !Ref AWS::NoValue
+  AnalyticsRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Fixed name matches the claude-scan-platform-* exemption in the optional SCPs and the telemetry bucket policy
+    Properties:
+      RoleName: !Sub claude-scan-platform-analytics-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref AnalyticsPolicy
+  AnalyticsFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: The role has AWSLambdaBasicExecutionRole, which grants CloudWatch Logs access
+          - id: W89
+            reason: Calls only S3 listing, Glue and Athena APIs; no VPC access needed
+          - id: W92
+            reason: Runs every 15 minutes and at deploy; reserving concurrency fails in new accounts whose limit is still 10
+      checkov:
+        skip:
+          - id: CKV_AWS_115
+            comment: Runs every 15 minutes and at deploy; reserving concurrency fails in new accounts whose limit is still 10
+          - id: CKV_AWS_116
+            comment: Scheduled and custom-resource invocations; a failed run is retried by the next schedule, a dead-letter queue doesn't apply
+          - id: CKV_AWS_117
+            comment: Calls only S3 listing, Glue and Athena APIs; no VPC access needed
+          - id: CKV_AWS_173
+            comment: The environment variables hold resource names, not secrets
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - keeps the telemetry tables' owner list current and creates the views
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 300
+      Role: !GetAtt AnalyticsRole.Arn
+      Environment:
+        Variables:
+          BUCKET: !Ref BucketName
+          DATABASE: !Ref Database
+          WORKGROUP: !Ref WorkGroup
+          RESULTS_BUCKET: !Ref ResultsBucket
+      Code:
+        ZipFile: |
+          import os, re, time
+          import boto3
+          import cfnresponse
+
+          s3, glue, athena = boto3.client("s3"), boto3.client("glue"), boto3.client("athena")
+          DB = os.environ["DATABASE"]
+          TABLES = ["otel_logs", "otel_metrics", "otel_traces"]
+
+          # Attribute arrays as a map; OTLP JSON carries integers as strings
+          ATTRS = ("map_from_entries(transform({a}, x -> ROW(x.key, coalesce(x.value.stringvalue, x.value.intvalue, "
+                   "CAST(x.value.doublevalue AS varchar), CAST(x.value.boolvalue AS varchar)))))")
+          VIEWS = {
+              "events": f"""
+                SELECT l.owner, l.dt, from_unixtime(CAST(r.timeunixnano AS bigint) / 1e9) AS event_time,
+                       a['event.name'] AS event_name, a['session.id'] AS session_id, a['prompt.id'] AS prompt_id,
+                       nullif(r.traceid, '') AS trace_id, CAST(a['event.sequence'] AS bigint) AS seq, a AS attrs
+                FROM otel_logs l
+                CROSS JOIN UNNEST(l.resourcelogs) AS t1(rl) CROSS JOIN UNNEST(rl.scopelogs) AS t2(sl)
+                CROSS JOIN UNNEST(sl.logrecords) AS t3(r)
+                CROSS JOIN UNNEST(ARRAY[{ATTRS.format(a='r.attributes')}]) AS t4(a)""",
+              "prompts": """
+                SELECT owner, dt, event_time, session_id, prompt_id, trace_id, attrs['prompt'] AS prompt,
+                       CAST(attrs['prompt_length'] AS integer) AS prompt_length
+                FROM events WHERE event_name = 'user_prompt'""",
+              "responses": """
+                SELECT owner, dt, event_time, session_id, prompt_id, trace_id, attrs['model'] AS model, attrs['response'] AS response
+                FROM events WHERE event_name = 'assistant_response'""",
+              "tool_calls": """
+                SELECT owner, dt, event_time, session_id, prompt_id, trace_id, attrs['tool_name'] AS tool_name,
+                       attrs['success'] = 'true' AS success, CAST(attrs['duration_ms'] AS bigint) AS duration_ms,
+                       attrs['tool_parameters'] AS tool_parameters, attrs['tool_input'] AS tool_input
+                FROM events WHERE event_name = 'tool_result'""",
+              "tool_decisions": """
+                SELECT owner, dt, event_time, session_id, prompt_id, trace_id, attrs['tool_name'] AS tool_name,
+                       attrs['decision'] AS decision, attrs['source'] AS source, attrs['tool_parameters'] AS tool_parameters
+                FROM events WHERE event_name = 'tool_decision'""",
+              "api_requests": """
+                SELECT owner, dt, event_time, session_id, prompt_id, trace_id, attrs['model'] AS model,
+                       CAST(attrs['input_tokens'] AS bigint) AS input_tokens, CAST(attrs['output_tokens'] AS bigint) AS output_tokens,
+                       CAST(attrs['cache_read_tokens'] AS bigint) AS cache_read_tokens,
+                       CAST(attrs['cache_creation_tokens'] AS bigint) AS cache_creation_tokens,
+                       CAST(attrs['cost_usd'] AS double) AS cost_usd, CAST(attrs['duration_ms'] AS bigint) AS duration_ms
+                FROM events WHERE event_name = 'api_request'""",
+              "api_errors": """
+                SELECT owner, dt, event_time, session_id, prompt_id, trace_id, attrs['model'] AS model, attrs['error'] AS error,
+                       attrs['status_code'] AS status_code
+                FROM events WHERE event_name = 'api_error'""",
+              "spans": f"""
+                SELECT t.owner, t.dt, sp.traceid AS trace_id, sp.spanid AS span_id, nullif(sp.parentspanid, '') AS parent_span_id,
+                       sp.name, from_unixtime(CAST(sp.starttimeunixnano AS bigint) / 1e9) AS start_time,
+                       CAST(sp.starttimeunixnano AS bigint) / 1e6 AS start_ms,
+                       (CAST(sp.endtimeunixnano AS bigint) - CAST(sp.starttimeunixnano AS bigint)) / 1e6 AS duration_ms,
+                       a['session.id'] AS session_id, sp.status.code AS status_code, sp.status.message AS status_message, a AS attrs
+                FROM otel_traces t
+                CROSS JOIN UNNEST(t.resourcespans) AS t1(rs) CROSS JOIN UNNEST(rs.scopespans) AS t2(ss)
+                CROSS JOIN UNNEST(ss.spans) AS t3(sp)
+                CROSS JOIN UNNEST(ARRAY[{ATTRS.format(a='sp.attributes')}]) AS t4(a)""",
+              "usage": f"""
+                SELECT m.owner, m.dt, from_unixtime(CAST(p.timeunixnano AS bigint) / 1e9) AS time, mt.name AS metric,
+                       a['model'] AS model, a['type'] AS type, a['session.id'] AS session_id, p.asdouble AS value
+                FROM otel_metrics m
+                CROSS JOIN UNNEST(m.resourcemetrics) AS t1(rm) CROSS JOIN UNNEST(rm.scopemetrics) AS t2(sm)
+                CROSS JOIN UNNEST(sm.metrics) AS t3(mt) CROSS JOIN UNNEST(mt.sum.datapoints) AS t4(p)
+                CROSS JOIN UNNEST(ARRAY[{ATTRS.format(a='p.attributes')}]) AS t5(a)""",
+          }
+
+          def reconcile():
+              """Adds owner folders (claude-code/<owner>/) to the tables' projection; never removes one."""
+              owners, token = set(), None
+              while True:
+                  kw = {"Bucket": os.environ["BUCKET"], "Prefix": "claude-code/", "Delimiter": "/"}
+                  if token:
+                      kw["ContinuationToken"] = token
+                  page = s3.list_objects_v2(**kw)
+                  owners |= {p["Prefix"].split("/")[1] for p in page.get("CommonPrefixes", [])}
+                  token = page.get("NextContinuationToken")
+                  if not token:
+                      break
+              owners = {o for o in owners if re.fullmatch(r"[a-z0-9-]+", o)}
+              for name in TABLES:
+                  table = glue.get_table(DatabaseName=DB, Name=name)["Table"]
+                  params = table.get("Parameters", {})
+                  current = {o for o in params.get("projection.owner.values", "").split(",") if o and o != "-"}
+                  if owners <= current:
+                      continue
+                  params["projection.owner.values"] = ",".join(sorted(owners | current))
+                  keep = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys", "TableType", "Parameters")
+                  glue.update_table(DatabaseName=DB, TableInput={k: v for k, v in table.items() if k in keep})
+
+          def run(sql):
+              qid = athena.start_query_execution(QueryString=sql, QueryExecutionContext={"Database": DB},
+                                                 WorkGroup=os.environ["WORKGROUP"])["QueryExecutionId"]
+              while True:
+                  status = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]["Status"]
+                  if status["State"] in ("SUCCEEDED", "FAILED", "CANCELLED"):
+                      break
+                  time.sleep(1)
+              if status["State"] != "SUCCEEDED":
+                  raise RuntimeError(f"{sql.split()[4]}: {status.get('StateChangeReason', status['State'])}")
+
+          def empty_results():
+              bucket = boto3.resource("s3").Bucket(os.environ["RESULTS_BUCKET"])
+              bucket.objects.all().delete()
+
+          def handler(event, context):
+              if "RequestType" not in event:   # the schedule
+                  reconcile()
+                  return
+              try:
+                  if event["RequestType"] == "Delete":
+                      empty_results()
+                  else:
+                      reconcile()
+                      for name, sql in VIEWS.items():
+                          run(f"CREATE OR REPLACE VIEW {name} AS {sql}")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "claude-scan-analytics")
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, "claude-scan-analytics", reason=str(e)[:500])
+
+  Setup:
+    Type: Custom::ClaudeScanAnalytics
+    DependsOn: [LogsTable, MetricsTable, TracesTable, ResultsBucketPolicy]
+    Properties:
+      ServiceToken: !GetAtt AnalyticsFunction.Arn
+      ServiceTimeout: 600
+      # Bump after changing the views or the tables: a table update also resets the owner list, which this restores
+      ViewsVersion: "2"
+
+  ReconcileSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Security Scanning with Claude Code on AWS - adds new owners to the telemetry tables
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Id: reconcile
+          Arn: !GetAtt AnalyticsFunction.Arn
+  ReconcilePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AnalyticsFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReconcileSchedule.Arn
+
+Outputs:
+  Database:
+    Value: !Ref Database
+  WorkGroup:
+    Value: !Ref WorkGroup
+  ResultsBucket:
+    Value: !Ref ResultsBucket
+  GrafanaAccessPolicyArn:
+    Value: !Ref GrafanaAccessPolicy
+  GrafanaWorkspaceId:
+    Value: !If [CreateWorkspace, !Ref Workspace, "none"]
+  GrafanaWorkspaceUrl:
+    Value: !If [CreateWorkspace, !Sub "https://${Workspace.Endpoint}", "none"]

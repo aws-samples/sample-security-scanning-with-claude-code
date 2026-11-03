@@ -39,3 +39,6 @@ packaged*.yaml
 
 # Local notes (troubleshooting insights)
 .notes/
+
+# Local instructions for coding agents
+CLAUDE.md

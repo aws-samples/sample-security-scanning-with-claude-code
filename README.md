@@ -71,6 +71,7 @@ sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
 | `infra/shared.yaml` | **Deploy once per account and region.** Root stack; nests the two below. |
 | `infra/network.yaml` | New VPC and the interface VPC endpoints boxes use; with your own VPC, only the endpoints you choose. |
 | `infra/storage.yaml` | Telemetry bucket, KMS key, S3 gateway endpoint (each skippable). |
+| `infra/analytics.yaml` | Optional: Athena tables and views over the telemetry, and a Grafana workspace (`ConfigureAnalytics`). |
 | `box/box.yaml` | **Deploy once per user.** The user's box, its role, and alarms. |
 | `scripts/box-bootstrap.sh` | Runs on each box at first boot (downloaded from your S3 bucket) and runs the setup modules below. |
 | `scripts/modules/` | One script per setup step: corporate CA, preflight checks, user, packages, telemetry, each toolchain, Claude Code, sign-in profile, settings, harness, banner, final checks. |
@@ -80,6 +81,7 @@ sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
 | `policies/` | The `ClaudeScanUser` Identity Center permission set, and optional AWS Organizations guardrails (SCPs and an RCP). |
 | `deploy.sh` | Optional command-line shortcut for the console steps below. |
 | `docs/hardening-for-production.md` | What to add before you use the sample in production. |
+| `docs/dashboards.md`, `dashboards/` | Optional Grafana dashboards over the telemetry, and how to set them up. |
 | `docs/scan-harness.md` | How to use `scan-harness.sh`: headless scans, results, the autonomous pipeline, troubleshooting. |
 
 ## Prerequisites
@@ -223,6 +225,7 @@ they'll be locked out.
 | `ConfigureBedrockLogging` | Yes | Account-wide; see below. |
 | `LogRetentionDays` | 365 | Live session recordings in CloudWatch Logs. |
 | `ExistingSessionLogGroupName` | blank | Only when re-creating a deleted shared stack under the same name: enter the kept `/claude-scan/<stack>/sessions` group to keep using it. |
+| `ConfigureAnalytics`, `CreateGrafanaWorkspace` | No, Yes | Optional Athena tables and Grafana dashboards over the telemetry; see [Dashboards](docs/dashboards.md). |
 
 #### Account-wide settings
 
@@ -405,6 +408,7 @@ everything (see [What each layer can miss](#what-each-layer-can-miss)):
 Telemetry objects are gzipped OTLP JSON, partitioned `year=/month=/day=/hour=`, and arrive within about
 a minute. Only the principals in `AdminPrincipalArnPatterns` can read the bucket the kit creates. When the
 stack creates the bucket, the bucket and the live session recordings in CloudWatch Logs both use the kit's KMS key.
+To browse the telemetry in Grafana dashboards, or query it with Athena, see [Dashboards](docs/dashboards.md).
 
 #### What each layer can miss
 
