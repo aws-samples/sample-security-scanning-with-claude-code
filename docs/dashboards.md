@@ -133,7 +133,9 @@ GROUP BY owner ORDER BY 2 DESC
 ## Costs
 
 - **Athena:** per TB of data scanned. Dashboard queries read only the hours in the selected time range.
-- **Amazon Managed Grafana:** per active user per month (editors and admins cost more than viewers).
+- **Amazon Managed Grafana:** per workspace per month, $9 per active editor or admin and $5 per active viewer, with
+  at least one editor license ($9) even if nobody signs in. Service accounts count as users: the one
+  `deploy.sh grafana-setup` uses is billed as an editor in months you run it.
 - **Lambda and the results bucket:** negligible.
 
 ## Turn it off

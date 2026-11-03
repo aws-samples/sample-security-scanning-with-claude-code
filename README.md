@@ -27,6 +27,10 @@ setup per account and region, then one box per user.
   toolchains, `ExtraPackages` for more, and `sudo`.
 - **Evaluate frontier cybersecurity models:** use Claude models on Amazon Bedrock, and add models that Claude Code
   doesn't list itself, such as Claude Mythos, to its `/model` picker.
+- **Analyze usage and activity:** the telemetry lands in S3 as OpenTelemetry JSON, so you can ingest it into your own
+  log analytics tools. The sample also includes an optional analytics stack (`ConfigureAnalytics`): AWS Glue tables
+  catalog the S3 data for Amazon Athena, and Grafana dashboards show usage metrics and each session's prompts, tool
+  calls and responses. See [Dashboards](docs/dashboards.md).
 
 ## What each user gets
 
@@ -47,6 +51,7 @@ setup per account and region, then one box per user.
  │ shared.yaml (once)                                                                         │
  │   network.yaml ─ VPC, private subnet, NAT, endpoints, flow logs       (or your VPC)        │
  │   storage.yaml ─ telemetry + access-log buckets, KMS key, S3 endpoint (or your bucket)     │
+ │   analytics.yaml ─ Glue tables, Athena views, Grafana dashboards  (optional)               │
  │   Session Manager preferences ─ land as 'claude', record every session                     │
  │   Bedrock invocation logging ─ every model request/response, server-side                   │
  │   SNS topic ─ emails the admin when a box's telemetry goes silent                          │
@@ -62,7 +67,8 @@ The shared stack creates (or adopts) the network and the telemetry bucket, confi
 invocation logging for the account, and holds the settings every box uses. Each box stack creates one EC2 instance
 for one user. On the box, Claude Code sends its telemetry to a local OpenTelemetry collector, which writes it to the
 telemetry bucket and sends a heartbeat metric to CloudWatch; an alarm emails the admin when a running box stops
-sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
+sending it. Model calls go to Amazon Bedrock with the user's own sign-in. With `ConfigureAnalytics`, the shared
+stack also catalogs the telemetry in AWS Glue for Athena queries and sets up Grafana dashboards over it.
 
 ## What's in this repository
 
@@ -492,11 +498,14 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 | Each box, 100 GiB gp3 disk | ~$8 |
 | VPC flow logs (shared) | ~$0.50/GB ingested into CloudWatch Logs |
 | S3, CloudWatch Logs, alarms | usually a few dollars |
+| Dashboards (optional, `ConfigureAnalytics`) | Amazon Managed Grafana: at least $9 per workspace, then $9 per active editor or admin and $5 per active viewer; Athena: $5 per TB scanned |
 
 ### Updating
 
 - **Update the kit:** re-upload changed files to the same S3 location. New boxes use them. To refresh a
   running box's helper: `sudo aws s3 cp s3://<bucket>/claude-scan-kit/scripts/scan-harness.sh /usr/local/bin/`.
+- **Refresh the dashboards** (with `ConfigureAnalytics`): after uploading a new kit version and updating the
+  shared stack, run `./deploy.sh grafana-setup`.
 - **Check a box's kit version:** it's in the login banner and in `/etc/claude-scan/kit-version` on the box
   (`dev` when the files were uploaded from a git clone instead of a downloaded zip).
 - **Add a toolchain or the harness to a running box** without rebuilding it: on the box, run
@@ -520,7 +529,9 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 - **Remove everything:**
   1. Delete every `claude-scan-box-<owner>` stack. The shared stack can't be deleted while box stacks use its exports.
   2. Delete the shared stack. This also removes the Session Manager preferences and turns off Bedrock invocation
-     logging in the account and region, if the stack configured them.
+     logging in the account and region, if the stack configured them. With `ConfigureAnalytics`, it also deletes the
+     Glue tables and views, the Athena query results and the Grafana workspace (or set `ConfigureAnalytics = No`
+     to remove only those). The telemetry stays.
   3. The stack **keeps** the audit data on purpose: the telemetry bucket, the access-log bucket, the telemetry KMS
      key and the session recordings log group (`/claude-scan/<shared-stack>/sessions`). When you no longer need the
      data, empty and delete both buckets (they're versioned, so delete all object versions), delete the log group,
