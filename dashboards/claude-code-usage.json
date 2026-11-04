@@ -1,0 +1,429 @@
+{
+  "uid": "claude-scan-usage",
+  "title": "Claude Code usage",
+  "description": "Cost, tokens, sessions and tools per user. No prompt or tool content.",
+  "tags": [
+    "claude-scan"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "grafana-athena-datasource",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "owner",
+        "label": "Owner",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-athena-datasource",
+          "uid": "${datasource}"
+        },
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "query": {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT DISTINCT owner FROM usage WHERE dt >= date_format(now() - interval '90' day, 'year=%Y/month=%m/day=%d/hour=%H') ORDER BY 1",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Cost (USD)",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT round(sum(value), 2) AS cost FROM usage WHERE metric = 'claude_code.cost.usage' AND dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring})",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Tokens",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT sum(value) AS tokens FROM usage WHERE metric = 'claude_code.token.usage' AND dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring})",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Sessions",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT sum(value) AS sessions FROM usage WHERE metric = 'claude_code.session.count' AND dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring})",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Active users",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT count(DISTINCT owner) AS users FROM usage WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring})",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Cost per user (USD per hour)",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 0,
+          "rawSQL": "SELECT date_trunc('hour', time) AS time, owner, sum(value) AS cost FROM usage WHERE metric = 'claude_code.cost.usage' AND dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) GROUP BY 1, 2 ORDER BY 1",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Tokens by type (per hour)",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 0,
+          "rawSQL": "SELECT date_trunc('hour', time) AS time, type, sum(value) AS tokens FROM usage WHERE metric = 'claude_code.token.usage' AND dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) GROUP BY 1, 2 ORDER BY 1",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Cost and tokens by user and model",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT owner, model, round(sum(cost_usd), 2) AS cost_usd, count(*) AS requests, sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens, sum(cache_read_tokens) AS cache_read_tokens, sum(cache_creation_tokens) AS cache_creation_tokens FROM api_requests WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) GROUP BY 1, 2 ORDER BY 3 DESC",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Activity by user",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT owner, round(sum(CASE WHEN metric = 'claude_code.active_time.total' THEN value END) / 3600, 1) AS active_hours, sum(CASE WHEN metric = 'claude_code.session.count' THEN value END) AS sessions, sum(CASE WHEN metric = 'claude_code.lines_of_code.count' THEN value END) AS lines_changed FROM usage WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) GROUP BY 1 ORDER BY 2 DESC",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Tools",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT tool_name, count(*) AS calls, round(avg(CASE WHEN success THEN 1.0 ELSE 0 END) * 100, 1) AS success_pct, round(avg(duration_ms)) AS avg_ms FROM tool_calls WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) GROUP BY 1 ORDER BY 2 DESC",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Permission decisions",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT tool_name, decision, source, count(*) AS count FROM tool_decisions WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) GROUP BY 1, 2, 3 ORDER BY 4 DESC",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

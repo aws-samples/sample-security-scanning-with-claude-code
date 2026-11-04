@@ -23,11 +23,15 @@ Metadata:
         Parameters: [CreateBucket, RetentionDays, ExistingBucketName, ExistingKmsKeyArn]
       - Label: { default: "Audit and detection" }
         Parameters: [ConfigureSessionManager, SessionIdleTimeoutMinutes, ConfigureBedrockLogging, LogRetentionDays, ExistingSessionLogGroupName]
+      - Label: { default: "Dashboards (optional)" }
+        Parameters: [ConfigureAnalytics, CreateGrafanaWorkspace]
     ParameterLabels:
       ArtifactBucket: { default: "Kit bucket name" }
       ArtifactPrefix: { default: "Kit folder prefix" }
       AdminEmail: { default: "Admin email for alarms" }
       AdminPrincipalArnPatterns: { default: "Admin role ARN patterns (only these can read telemetry)" }
+      ConfigureAnalytics: { default: "Set up Athena tables and Grafana dashboards over the telemetry?" }
+      CreateGrafanaWorkspace: { default: "Create an Amazon Managed Grafana workspace (No = use your own)?" }
       AuthMode: { default: "How users sign in to AWS on their boxes" }
       SsoStartUrl: { default: "Identity Center start URL" }
       SsoRegion: { default: "Identity Center region" }
@@ -253,6 +257,18 @@ Parameters:
     AllowedValues: ["Yes", "No"]
     Default: "Yes"
     Description: Account-wide - sets Bedrock invocation logging in this region; fails if logging is already configured (then set No)
+  ConfigureAnalytics:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "No"
+    Description: >-
+      Athena tables and views over the telemetry bucket, for dashboards. The analytics and Grafana roles are added to
+      the principals that can read the bucket (when this stack creates it). See docs/dashboards.md.
+  CreateGrafanaWorkspace:
+    Type: String
+    AllowedValues: ["Yes", "No"]
+    Default: "Yes"
+    Description: With ConfigureAnalytics - an Amazon Managed Grafana workspace with IAM Identity Center sign-in. No = attach the stack's Grafana policy to your own workspace's role.
   LogRetentionDays:
     Type: Number
     Default: 365
@@ -328,6 +344,7 @@ Conditions:
   SsoAccountIsThisAccount: !Equals [!Ref SsoAccountId, ""]
   ConfigureSessionManager: !Equals [!Ref ConfigureSessionManager, "Yes"]
   ConfigureBedrockLogging: !Equals [!Ref ConfigureBedrockLogging, "Yes"]
+  ConfigureAnalytics: !Equals [!Ref ConfigureAnalytics, "Yes"]
 
 Resources:
   Network:
@@ -354,7 +371,15 @@ Resources:
       Parameters:
         CreateBucket: !Ref CreateBucket
         RetentionDays: !Ref RetentionDays
-        AdminPrincipalArnPatterns: !Ref AdminPrincipalArnPatterns
+        # With dashboards, the analytics roles may read the bucket too (their IAM policies limit what they read)
+        AdminPrincipalArnPatterns: !If
+          - ConfigureAnalytics
+          - !Join
+            - ","
+            - - !Ref AdminPrincipalArnPatterns
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/claude-scan-platform-analytics-${AWS::Region}
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/claude-scan-platform-grafana-${AWS::Region}
+          - !Ref AdminPrincipalArnPatterns
         CreateS3GatewayEndpoint: !If [CreateS3Gateway, "Yes", "No"]
         VpcId: !If [CreateNetwork, !GetAtt Network.Outputs.VpcId, !Ref ExistingVpcId]
         RouteTableIds: !If [CreateNetwork, !GetAtt Network.Outputs.PrivateRouteTableId, !Ref ExistingRouteTableIds]
@@ -362,6 +387,18 @@ Resources:
         ArtifactBucket: !Ref ArtifactBucket
         ArtifactPrefix: !Ref ArtifactPrefix
         ExistingBucketName: !Ref ExistingBucketName
+
+  Analytics:
+    Type: AWS::CloudFormation::Stack
+    Condition: ConfigureAnalytics
+    Properties:
+      TemplateURL: !Sub https://${ArtifactBucket}.s3.${AWS::Region}.${AWS::URLSuffix}/${ArtifactPrefix}infra/analytics.yaml
+      Parameters:
+        SharedStackName: !Ref AWS::StackName
+        BucketName: !If [CreateBucket, !GetAtt Storage.Outputs.BucketName, !Ref ExistingBucketName]
+        KmsKeyArn: !If [CreateKey, !GetAtt Storage.Outputs.KmsKeyArn, !Ref ExistingKmsKeyArn]
+        AccessLogsBucketName: !If [CreateBucket, !GetAtt Storage.Outputs.AccessLogsBucketName, "none"]
+        CreateGrafanaWorkspace: !Ref CreateGrafanaWorkspace
 
   # Alarm notifications are encrypted with their own key: CloudWatch alarms can't publish to a topic that
   # uses the AWS managed aws/sns key
@@ -874,6 +911,19 @@ Outputs:
   AccessLogsBucket:
     Description: S3 access logs for the telemetry bucket (who read or wrote which object), when this stack creates the bucket
     Value: !If [CreateBucket, !GetAtt Storage.Outputs.AccessLogsBucketName, "none"]
+  AnalyticsDatabase:
+    Description: Glue database with the telemetry tables and views (ConfigureAnalytics)
+    Value: !If [ConfigureAnalytics, !GetAtt Analytics.Outputs.Database, "none"]
+  AnalyticsWorkGroup:
+    Description: Athena workgroup for dashboards and queries (ConfigureAnalytics)
+    Value: !If [ConfigureAnalytics, !GetAtt Analytics.Outputs.WorkGroup, "none"]
+  GrafanaWorkspaceUrl:
+    Value: !If [ConfigureAnalytics, !GetAtt Analytics.Outputs.GrafanaWorkspaceUrl, "none"]
+  GrafanaWorkspaceId:
+    Value: !If [ConfigureAnalytics, !GetAtt Analytics.Outputs.GrafanaWorkspaceId, "none"]
+  GrafanaAccessPolicyArn:
+    Description: Attach to your own Grafana workspace's role (CreateGrafanaWorkspace = No), and add that role to AdminPrincipalArnPatterns
+    Value: !If [ConfigureAnalytics, !GetAtt Analytics.Outputs.GrafanaAccessPolicyArn, "none"]
   ArtifactBucket:
     Value: !Ref ArtifactBucket
     Export: { Name: !Sub "${AWS::StackName}-ArtifactBucket" }

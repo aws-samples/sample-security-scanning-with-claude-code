@@ -1,0 +1,537 @@
+{
+  "uid": "claude-scan-activity",
+  "title": "Claude Code activity",
+  "description": "Sessions, then their prompts, then each prompt's model calls, tool calls and responses, including their content. Share only with the people who can read the telemetry bucket.",
+  "tags": [
+    "claude-scan"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "grafana-athena-datasource",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "owner",
+        "label": "Owner",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-athena-datasource",
+          "uid": "${datasource}"
+        },
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "query": {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT DISTINCT owner FROM usage WHERE dt >= date_format(now() - interval '90' day, 'year=%Y/month=%m/day=%d/hour=%H') ORDER BY 1",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      },
+      {
+        "name": "session",
+        "label": "Session",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-athena-datasource",
+          "uid": "${datasource}"
+        },
+        "multi": false,
+        "includeAll": false,
+        "refresh": 2,
+        "sort": 0,
+        "current": {},
+        "query": {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT session_id AS __value, concat(format_datetime(max(event_time), 'yyyy-MM-dd HH:mm'), ' ', owner, ' ', substr(session_id, 1, 8)) AS __text FROM events WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) AND session_id IS NOT NULL GROUP BY session_id, owner ORDER BY max(event_time) DESC LIMIT 200",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      },
+      {
+        "name": "prompt",
+        "label": "Prompt",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-athena-datasource",
+          "uid": "${datasource}"
+        },
+        "multi": false,
+        "includeAll": false,
+        "refresh": 2,
+        "sort": 0,
+        "current": {},
+        "query": {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT trace_id AS __value, concat(format_datetime(min(event_time), 'HH:mm:ss'), ' ', coalesce(substr(max(CASE WHEN event_name = 'user_prompt' THEN attrs['prompt'] END), 1, 80), trace_id)) AS __text FROM events WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) AND session_id = ${session:sqlstring} AND trace_id IS NOT NULL GROUP BY trace_id ORDER BY min(event_time) DESC",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Sessions",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Sessions",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT session_id AS session, owner, min(event_time) AS started, max(event_time) AS last_activity, count_if(event_name = 'user_prompt') AS prompts, count_if(event_name = 'tool_result') AS tool_calls, count_if(event_name = 'tool_decision' AND attrs['decision'] <> 'accept') AS rejected, round(sum(CASE WHEN event_name = 'api_request' THEN CAST(attrs['cost_usd'] AS double) END), 2) AS cost_usd FROM events WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) AND session_id IS NOT NULL GROUP BY 1, 2 ORDER BY 4 DESC LIMIT 200",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "session"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Show this session's prompts",
+                    "url": "/d/claude-scan-activity/claude-code-activity?${__url_time_range}&${owner:queryparam}&var-session=${__data.fields.session}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {},
+      "description": "Click a session to show its prompts below"
+    },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "Prompts in session ${session}",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Prompts",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT min(event_time) AS time, trace_id, max(CASE WHEN event_name = 'user_prompt' THEN substr(attrs['prompt'], 1, 300) END) AS prompt, count_if(event_name = 'tool_result') AS tool_calls, count_if(event_name = 'api_request') AS model_calls, round(sum(CASE WHEN event_name = 'api_request' THEN CAST(attrs['cost_usd'] AS double) END), 4) AS cost_usd, round(to_milliseconds(max(event_time) - min(event_time)) / 1000.0, 1) AS seconds FROM events WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) AND session_id = ${session:sqlstring} AND trace_id IS NOT NULL GROUP BY trace_id ORDER BY 1 DESC",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "prompt"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Show this prompt's trace and transcript",
+                    "url": "/d/claude-scan-activity/claude-code-activity?${__url_time_range}&${owner:queryparam}&${session:queryparam}&var-prompt=${__data.fields.trace_id}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trace_id"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "prompt"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 700
+              }
+            ]
+          }
+        ]
+      },
+      "options": {},
+      "description": "Click a prompt to show its trace and transcript below"
+    },
+    {
+      "id": 102,
+      "type": "row",
+      "title": "Selected prompt",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 3,
+      "type": "traces",
+      "title": "Trace: model calls and tool calls",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 3,
+          "rawSQL": "SELECT trace_id AS traceID, span_id AS spanID, parent_span_id AS parentSpanID, CASE name WHEN 'claude_code.interaction' THEN concat('Prompt: ', coalesce(substr(attrs['user_prompt'], 1, 100), '')) WHEN 'claude_code.llm_request' THEN concat('Model call ', coalesce(attrs['model'], ''), ' in ', coalesce(attrs['input_tokens'], '0'), ' / out ', coalesce(attrs['output_tokens'], '0'), ' tokens') WHEN 'claude_code.tool' THEN concat('Tool ', coalesce(attrs['tool_name'], ''), ': ', coalesce(substr(coalesce(attrs['full_command'], attrs['file_path']), 1, 100), '')) WHEN 'claude_code.tool.blocked_on_user' THEN concat('Permission: ', coalesce(attrs['decision'], ''), ' (', coalesce(attrs['source'], ''), ')') WHEN 'claude_code.tool.execution' THEN CASE attrs['success'] WHEN 'false' THEN concat('Run failed: ', coalesce(substr(attrs['error'], 1, 100), '')) ELSE 'Run' END ELSE name END AS operationName, owner AS serviceName, start_ms AS startTime, duration_ms AS duration, CASE status_code WHEN 2 THEN 2 ELSE 0 END AS statusCode, status_message AS statusMessage, json_format(CAST(transform(map_entries(map_filter(attrs, (k, v) -> v IS NOT NULL AND k NOT IN ('app.version', 'claude_scan.kit_version', 'enduser.id', 'gen_ai.conversation.id', 'gen_ai.provider.name', 'session.id', 'span.type', 'terminal.type', 'user.id', 'user_prompt'))), e -> MAP(ARRAY['key', 'value'], ARRAY[e[1], e[2]])) AS json)) AS tags FROM spans WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) AND trace_id = ${prompt:sqlstring} ORDER BY start_ms",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "The prompt's spans: each model call, and each tool call with its permission decision and run",
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "fields": {},
+            "conversions": [
+              {
+                "targetField": "tags",
+                "destinationType": "other"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Transcript",
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT seq AS step, event_time AS time, CASE event_name WHEN 'user_prompt' THEN 'Prompt' WHEN 'api_request' THEN 'Model call' WHEN 'tool_decision' THEN 'Permission' WHEN 'tool_result' THEN 'Tool' WHEN 'assistant_response' THEN 'Response' WHEN 'api_error' THEN 'Model error' ELSE event_name END AS event, attrs['tool_name'] AS tool, coalesce(attrs['decision'], CASE attrs['success'] WHEN 'true' THEN 'ok' WHEN 'false' THEN 'failed' END) AS result, attrs['model'] AS model, CAST(attrs['input_tokens'] AS bigint) AS input_tokens, CAST(attrs['output_tokens'] AS bigint) AS output_tokens, CAST(attrs['cost_usd'] AS double) AS cost_usd, substr(coalesce(attrs['prompt'], attrs['tool_parameters'], attrs['response'], attrs['error']), 1, 1000) AS content FROM events WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) AND trace_id = ${prompt:sqlstring} AND event_name IN ('user_prompt', 'api_request', 'tool_decision', 'tool_result', 'assistant_response', 'api_error') ORDER BY seq",
+          "connectionArgs": {
+            "catalog": "__default",
+            "database": "__default",
+            "region": "__default"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "content"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 800
+              }
+            ]
+          }
+        ]
+      },
+      "options": {},
+      "description": "Every event of the prompt, in order, with the first 1,000 characters of its content"
+    },
+    {
+      "id": 103,
+      "type": "row",
+      "title": "Across all sessions",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 5,
+          "type": "table",
+          "title": "Rejected tool requests",
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 42,
+            "w": 24,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-athena-datasource",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "format": 1,
+              "rawSQL": "SELECT event_time AS time, owner, session_id, trace_id, tool_name, decision, source, substr(tool_parameters, 1, 1000) AS parameters FROM tool_decisions WHERE decision <> 'accept' AND dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) ORDER BY event_time DESC LIMIT 500",
+              "connectionArgs": {
+                "catalog": "__default",
+                "database": "__default",
+                "region": "__default"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "parameters"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "title": "Show this prompt",
+                        "url": "/d/claude-scan-activity/claude-code-activity?${__url_time_range}&${owner:queryparam}&var-session=${__data.fields.session_id}&var-prompt=${__data.fields.trace_id}"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "trace_id"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hidden",
+                    "value": true
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {}
+        },
+        {
+          "id": 6,
+          "type": "table",
+          "title": "Model errors",
+          "datasource": {
+            "type": "grafana-athena-datasource",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 50,
+            "w": 24,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-athena-datasource",
+                "uid": "${datasource}"
+              },
+              "refId": "A",
+              "format": 1,
+              "rawSQL": "SELECT event_time AS time, owner, session_id, trace_id, model, status_code, substr(error, 1, 500) AS error FROM api_errors WHERE dt BETWEEN date_format($__timeFrom(), 'year=%Y/month=%m/day=%d/hour=%H') AND date_format($__timeTo(), 'year=%Y/month=%m/day=%d/hour=%H') AND owner IN (${owner:sqlstring}) ORDER BY event_time DESC LIMIT 500",
+              "connectionArgs": {
+                "catalog": "__default",
+                "database": "__default",
+                "region": "__default"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "error"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "title": "Show this prompt",
+                        "url": "/d/claude-scan-activity/claude-code-activity?${__url_time_range}&${owner:queryparam}&var-session=${__data.fields.session_id}&var-prompt=${__data.fields.trace_id}"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "trace_id"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hidden",
+                    "value": true
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {}
+        }
+      ]
+    }
+  ]
+}

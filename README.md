@@ -27,6 +27,10 @@ setup per account and region, then one box per user.
   toolchains, `ExtraPackages` for more, and `sudo`.
 - **Evaluate frontier cybersecurity models:** use Claude models on Amazon Bedrock, and add models that Claude Code
   doesn't list itself, such as Claude Mythos, to its `/model` picker.
+- **Analyze usage and activity:** the telemetry lands in S3 as OpenTelemetry JSON, so you can ingest it into your own
+  log analytics tools. The sample also includes an optional analytics stack (`ConfigureAnalytics`): AWS Glue tables
+  catalog the S3 data for Amazon Athena, and Grafana dashboards show usage metrics and each session's prompts, tool
+  calls and responses. See [Dashboards](docs/dashboards.md).
 
 ## What each user gets
 
@@ -47,6 +51,7 @@ setup per account and region, then one box per user.
  │ shared.yaml (once)                                                                         │
  │   network.yaml ─ VPC, private subnet, NAT, endpoints, flow logs       (or your VPC)        │
  │   storage.yaml ─ telemetry + access-log buckets, KMS key, S3 endpoint (or your bucket)     │
+ │   analytics.yaml ─ Glue tables, Athena views, Grafana dashboards  (optional)               │
  │   Session Manager preferences ─ land as 'claude', record every session                     │
  │   Bedrock invocation logging ─ every model request/response, server-side                   │
  │   SNS topic ─ emails the admin when a box's telemetry goes silent                          │
@@ -62,7 +67,8 @@ The shared stack creates (or adopts) the network and the telemetry bucket, confi
 invocation logging for the account, and holds the settings every box uses. Each box stack creates one EC2 instance
 for one user. On the box, Claude Code sends its telemetry to a local OpenTelemetry collector, which writes it to the
 telemetry bucket and sends a heartbeat metric to CloudWatch; an alarm emails the admin when a running box stops
-sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
+sending it. Model calls go to Amazon Bedrock with the user's own sign-in. With `ConfigureAnalytics`, the shared
+stack also catalogs the telemetry in AWS Glue for Athena queries and sets up Grafana dashboards over it.
 
 ## What's in this repository
 
@@ -71,6 +77,7 @@ sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
 | `infra/shared.yaml` | **Deploy once per account and region.** Root stack; nests the two below. |
 | `infra/network.yaml` | New VPC and the interface VPC endpoints boxes use; with your own VPC, only the endpoints you choose. |
 | `infra/storage.yaml` | Telemetry bucket, KMS key, S3 gateway endpoint (each skippable). |
+| `infra/analytics.yaml` | Optional: Athena tables and views over the telemetry, and a Grafana workspace (`ConfigureAnalytics`). |
 | `box/box.yaml` | **Deploy once per user.** The user's box, its role, and alarms. |
 | `scripts/box-bootstrap.sh` | Runs on each box at first boot (downloaded from your S3 bucket) and runs the setup modules below. |
 | `scripts/modules/` | One script per setup step: corporate CA, preflight checks, user, packages, telemetry, each toolchain, Claude Code, sign-in profile, settings, harness, banner, final checks. |
@@ -80,6 +87,7 @@ sending it. Model calls go to Amazon Bedrock with the user's own sign-in.
 | `policies/` | The `ClaudeScanUser` Identity Center permission set, and optional AWS Organizations guardrails (SCPs and an RCP). |
 | `deploy.sh` | Optional command-line shortcut for the console steps below. |
 | `docs/hardening-for-production.md` | What to add before you use the sample in production. |
+| `docs/dashboards.md`, `dashboards/` | Optional Grafana dashboards over the telemetry, and how to set them up. |
 | `docs/scan-harness.md` | How to use `scan-harness.sh`: headless scans, results, the autonomous pipeline, troubleshooting. |
 
 ## Prerequisites
@@ -223,6 +231,7 @@ they'll be locked out.
 | `ConfigureBedrockLogging` | Yes | Account-wide; see below. |
 | `LogRetentionDays` | 365 | Live session recordings in CloudWatch Logs. |
 | `ExistingSessionLogGroupName` | blank | Only when re-creating a deleted shared stack under the same name: enter the kept `/claude-scan/<stack>/sessions` group to keep using it. |
+| `ConfigureAnalytics`, `CreateGrafanaWorkspace` | No, Yes | Optional Athena tables and Grafana dashboards over the telemetry; see [Dashboards](docs/dashboards.md). |
 
 #### Account-wide settings
 
@@ -405,6 +414,7 @@ everything (see [What each layer can miss](#what-each-layer-can-miss)):
 Telemetry objects are gzipped OTLP JSON, partitioned `year=/month=/day=/hour=`, and arrive within about
 a minute. Only the principals in `AdminPrincipalArnPatterns` can read the bucket the kit creates. When the
 stack creates the bucket, the bucket and the live session recordings in CloudWatch Logs both use the kit's KMS key.
+To browse the telemetry in Grafana dashboards, or query it with Athena, see [Dashboards](docs/dashboards.md).
 
 #### What each layer can miss
 
@@ -488,11 +498,14 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 | Each box, 100 GiB gp3 disk | ~$8 |
 | VPC flow logs (shared) | ~$0.50/GB ingested into CloudWatch Logs |
 | S3, CloudWatch Logs, alarms | usually a few dollars |
+| Dashboards (optional, `ConfigureAnalytics`) | Amazon Managed Grafana: at least $9 per workspace, then $9 per active editor or admin and $5 per active viewer; Athena: $5 per TB scanned |
 
 ### Updating
 
 - **Update the kit:** re-upload changed files to the same S3 location. New boxes use them. To refresh a
   running box's helper: `sudo aws s3 cp s3://<bucket>/claude-scan-kit/scripts/scan-harness.sh /usr/local/bin/`.
+- **Refresh the dashboards** (with `ConfigureAnalytics`): after uploading a new kit version and updating the
+  shared stack, run `./deploy.sh grafana-setup`.
 - **Check a box's kit version:** it's in the login banner and in `/etc/claude-scan/kit-version` on the box
   (`dev` when the files were uploaded from a git clone instead of a downloaded zip).
 - **Add a toolchain or the harness to a running box** without rebuilding it: on the box, run
@@ -516,7 +529,9 @@ Approximate, us-west-2, before Bedrock usage (which is usually the largest cost)
 - **Remove everything:**
   1. Delete every `claude-scan-box-<owner>` stack. The shared stack can't be deleted while box stacks use its exports.
   2. Delete the shared stack. This also removes the Session Manager preferences and turns off Bedrock invocation
-     logging in the account and region, if the stack configured them.
+     logging in the account and region, if the stack configured them. With `ConfigureAnalytics`, it also deletes the
+     Glue tables and views, the Athena query results and the Grafana workspace (or set `ConfigureAnalytics = No`
+     to remove only those). The telemetry stays.
   3. The stack **keeps** the audit data on purpose: the telemetry bucket, the access-log bucket, the telemetry KMS
      key and the session recordings log group (`/claude-scan/<shared-stack>/sessions`). When you no longer need the
      data, empty and delete both buckets (they're versioned, so delete all object versions), delete the log group,

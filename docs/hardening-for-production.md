@@ -73,7 +73,7 @@ In a VPC the kit builds, the endpoint policies allow only what boxes need:
 | Endpoint | Allows |
 |---|---|
 | `bedrock-runtime` | Model calls (`InvokeModel`, `InvokeModelWithResponseStream`, `CountTokens`, `CallWithBearerToken`) by this account's principals. This endpoint has the policy in your own VPC too. |
-| `bedrock`, `ssm`, `ssmmessages`, `ec2messages`, `logs`, `cloudformation` | Calls by this account's principals. |
+| `bedrock`, `ssm`, `ssmmessages`, `ec2messages`, `logs`, `cloudformation` | That service's actions (for example `ssm:*` on the `ssm` endpoint), by this account's principals. |
 | S3 gateway | Reads of the kit files (`<kit bucket>/<prefix>*`). Writes to the telemetry bucket, by this account's principals. Reads of the AWS-owned buckets for Amazon Linux packages and SSM Agent updates (`al2023-repos-<region>-de612dc2`, `amazon-ssm-<region>`, `aws-ssm-<region>`, `<region>-birdwatcher-prod`). |
 
 As a result, a box can't copy data to other S3 buckets in the Region, and it can't use another account's

@@ -9,6 +9,8 @@
 #   ./deploy.sh box <owner> [Key=Value ...]                   # deploy box/box.yaml for one user
 #   ./deploy.sh connect <owner> | status | delete-box <owner>
 #   ./deploy.sh doctor <owner>                                # why a box failed or can't be reached (read-only)
+#   ./deploy.sh grafana-setup                                 # Athena plugin, data source and dashboards in the
+#                                                             # shared stack's Grafana workspace (ConfigureAnalytics)
 # Key=Value pairs are extra stack parameters, e.g. CreateNetwork=No ExistingVpcId=vpc-... or
 #   AuthMode=IamUser (shared) or InstanceType=t3.2xlarge Toolchains=python,node (box)
 # Env: AWS_PROFILE, AWS_REGION, SHARED_STACK (default claude-scan-shared), PREFIX (default claude-scan-kit/)
@@ -96,5 +98,36 @@ case "${1:-}" in
     aws cloudformation delete-stack --stack-name "$(box_stack "$2")"
     aws cloudformation wait stack-delete-complete --stack-name "$(box_stack "$2")"
     echo "Deleted box for $2. Its telemetry and session recordings stay in the bucket." ;;
-  *) sed -n '2,10p' "$0"; exit 1 ;;
+  grafana-setup)
+    ws=$(output "$SHARED_STACK" GrafanaWorkspaceId)
+    url=$(output "$SHARED_STACK" GrafanaWorkspaceUrl)
+    [[ -n $ws && $ws != none ]] || die "the shared stack has no Grafana workspace (ConfigureAnalytics, CreateGrafanaWorkspace)"
+    command -v jq >/dev/null || die "jq is required"
+    # A short-lived admin token for the workspace's API, kept in a file rather than on command lines
+    sa=$(aws grafana list-workspace-service-accounts --workspace-id "$ws" \
+      --query "serviceAccounts[?name=='claude-scan-setup'].id | [0]" --output text)
+    [[ -n $sa && $sa != None ]] || sa=$(aws grafana create-workspace-service-account --workspace-id "$ws" \
+      --name claude-scan-setup --grafana-role ADMIN --query id --output text)
+    auth=$(mktemp); trap 'rm -f "$auth"' EXIT
+    aws grafana create-workspace-service-account-token --workspace-id "$ws" --service-account-id "$sa" \
+      --name "setup-$(date +%s)" --seconds-to-live 900 --query serviceAccountToken.key --output text |
+      sed 's/^/Authorization: Bearer /' > "$auth"
+    api() { curl -fsS -H @"$auth" -H 'Content-Type: application/json' "$url/api/$1" "${@:2}"; }
+    echo "== Athena plugin"
+    api plugins/grafana-athena-datasource/settings >/dev/null 2>&1 ||
+      api plugins/grafana-athena-datasource/install -X POST -d '{}' >/dev/null
+    echo "== Data source"
+    ds=$(jq -n --arg wg "$(output "$SHARED_STACK" AnalyticsWorkGroup)" --arg db "$(output "$SHARED_STACK" AnalyticsDatabase)" \
+      --arg region "${AWS_REGION:-$(aws configure get region)}" \
+      '{name: "Claude scan telemetry", type: "grafana-athena-datasource", access: "proxy", isDefault: true,
+        jsonData: {authType: "ec2_iam_role", defaultRegion: $region, catalog: "AwsDataCatalog", database: $db, workgroup: $wg}}')
+    uid=$(api datasources/name/Claude%20scan%20telemetry 2>/dev/null | jq -r .uid || true)
+    if [[ -n $uid && $uid != null ]]; then api "datasources/uid/$uid" -X PUT -d "$ds" >/dev/null
+    else api datasources -X POST -d "$ds" >/dev/null; fi
+    echo "== Dashboards"
+    for f in "$DIR"/dashboards/*.json; do
+      jq '{dashboard: (. + {id: null}), overwrite: true}' "$f" | api dashboards/db -X POST -d @- | jq -r '"  " + .url'
+    done
+    echo "Open $url and sign in with IAM Identity Center. Assign users first (docs/dashboards.md)." ;;
+  *) sed -n '2,12p' "$0"; exit 1 ;;
 esac
