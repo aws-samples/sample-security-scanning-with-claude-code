@@ -268,9 +268,9 @@ Resources:
       DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
 
   # Endpoint policies. bedrock-runtime takes model calls by this account's principals only. In a VPC the kit
-  # builds, the other endpoints take only this account's principals too. In your own VPC they keep the default
-  # policy: private DNS sends every workload's calls through them, including other accounts' roles and
-  # cfn-signal's unsigned instance-identity calls.
+  # builds, the other endpoints take only this account's principals too, for their own service's actions. In your
+  # own VPC they keep the default policy: private DNS sends every workload's calls through them, including other
+  # accounts' roles and cfn-signal's unsigned instance-identity calls.
 
   # The optional agent-perimeter SCP denies model calls that don't arrive through this endpoint
   BedrockRuntimeEndpoint:
@@ -316,7 +316,7 @@ Resources:
           Statement:
             - Effect: Allow
               Principal: "*"
-              Action: "*"
+              Action: "bedrock:*"
               Resource: "*"
               Condition:
                 StringEquals:
@@ -340,7 +340,7 @@ Resources:
           Statement:
             - Effect: Allow
               Principal: "*"
-              Action: "*"
+              Action: "ssm:*"
               Resource: "*"
               Condition:
                 StringEquals:
@@ -362,7 +362,7 @@ Resources:
           Statement:
             - Effect: Allow
               Principal: "*"
-              Action: "*"
+              Action: "ssmmessages:*"
               Resource: "*"
               Condition:
                 StringEquals:
@@ -384,7 +384,7 @@ Resources:
           Statement:
             - Effect: Allow
               Principal: "*"
-              Action: "*"
+              Action: "ec2messages:*"
               Resource: "*"
               Condition:
                 StringEquals:
@@ -408,7 +408,7 @@ Resources:
           Statement:
             - Effect: Allow
               Principal: "*"
-              Action: "*"
+              Action: "logs:*"
               Resource: "*"
               Condition:
                 StringEquals:
@@ -432,7 +432,7 @@ Resources:
           Statement:
             - Effect: Allow
               Principal: "*"
-              Action: "*"
+              Action: "cloudformation:*"
               Resource: "*"
               Condition:
                 StringEquals:

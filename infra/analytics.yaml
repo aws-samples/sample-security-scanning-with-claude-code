@@ -246,7 +246,7 @@ Resources:
       cfn_nag:
         rules_to_suppress:
           - id: W13
-            reason: athena:ListWorkGroups, ListDataCatalogs and GetDataCatalog support only Resource "*"
+            reason: athena:ListWorkGroups and athena:ListDataCatalogs support only Resource "*"
     Properties:
       Description: Security Scanning with Claude Code on AWS - Athena queries over the telemetry, for Grafana
       PolicyDocument:
@@ -254,12 +254,13 @@ Resources:
         Statement:
           - Sid: AthenaDiscovery
             Effect: Allow
-            Action: [athena:ListWorkGroups, athena:ListDataCatalogs, athena:GetDataCatalog]
+            Action: [athena:ListWorkGroups, athena:ListDataCatalogs]
             Resource: "*"
           - Sid: AthenaQueries
             Effect: Allow
             Action:
               - athena:GetWorkGroup
+              - athena:GetDataCatalog
               - athena:StartQueryExecution
               - athena:StopQueryExecution
               - athena:GetQueryExecution
